@@ -18,13 +18,10 @@ from loguru import logger
 
 from .configs import (
     DeploymentConfig,
-    DeploymentState,
     InstanceInfo,
     NodeInfo,
-    CloudProvider,
 )
 from .configs.loader import ConfigLoader, StateManager
-from .cloud import get_cloud_factory
 from .image_management import ImageManager
 from .server_deployment import ServerDeployer
 from .node_management import NodeManager
@@ -59,18 +56,23 @@ class ConfluxDeployer:
             config: Deployment configuration
             state_path: Path to save/load state (defaults to ./state/<deployment_id>.json)
         """
+        # Ensure deployment_id is always set (ConfigLoader typically provides it,
+        # but the type allows None).
+        if not config.deployment_id:
+            config.deployment_id = f"deploy-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         self.config = config
         
         # Set up state path
         if state_path is None:
-            state_path = Path("./state") / f"{config.deployment_id}.json"
+            state_path = Path("./state") / f"{self.config.deployment_id}.json"
         
         self.state_path = state_path
         self.state_manager = StateManager(state_path)
         
         # Initialize managers (lazily)
         self._image_manager: Optional[ImageManager] = None
-        self._server_deployer: Optional[ServerDeployer] = None
+        # Allow test fakes to be injected.
+        self._server_deployer: Optional[Any] = None
         self._node_manager: Optional[NodeManager] = None
         self._test_controller: Optional[TestController] = None
         self._cleanup_manager: Optional[ResourceCleanupManager] = None
@@ -115,7 +117,8 @@ class ConfluxDeployer:
     def server_deployer(self) -> ServerDeployer:
         """Get or create server deployer"""
         if self._server_deployer is None:
-            self._server_deployer = ServerDeployer(self.config, self.state_manager)
+            images = self.state_manager.state.images if self.state_manager.state else {}
+            self._server_deployer = ServerDeployer(self.config, self.state_manager, images=images)
         return self._server_deployer
     
     @property
@@ -123,7 +126,7 @@ class ConfluxDeployer:
         """Get or create node manager"""
         if self._node_manager is None:
             instances = self.state_manager.state.instances if self.state_manager.state else []
-            self._node_manager = NodeManager(self.config, instances, self.state_manager)
+            self._node_manager = NodeManager(self.config, instances, ssh_key_path=self.config.ssh_private_key_path)
         return self._node_manager
     
     @property
@@ -208,7 +211,10 @@ class ConfluxDeployer:
             Dict mapping provider -> region -> image_id
         """
         logger.info("Creating server images...")
-        self.state_manager.initialize(self.config.deployment_id)
+        deployment_id = self.config.deployment_id
+        if not deployment_id:
+            raise ValueError("deployment_id is required")
+        self.state_manager.initialize(str(deployment_id))
         self.state_manager.update_phase("creating_images")
         
         images = self.image_manager.ensure_images_exist(force_recreate=force_recreate)
@@ -227,7 +233,22 @@ class ConfluxDeployer:
         Returns:
             Dict mapping provider -> region -> image_id
         """
-        return self.image_manager.find_existing_images()
+        images: Dict[str, Dict[str, str]] = {}
+        seen: set[tuple[str, str]] = set()
+
+        for region in self.config.regions:
+            provider_key = region.provider.value
+            region_id = region.region_id
+            if (provider_key, region_id) in seen:
+                continue
+            seen.add((provider_key, region_id))
+
+            found = self.image_manager.find_existing_image(region.provider, region_id)
+            if not found:
+                continue
+            images.setdefault(provider_key, {})[region_id] = found.image_id
+
+        return images
     
     def delete_images(self) -> Dict[str, bool]:
         """
@@ -250,6 +271,10 @@ class ConfluxDeployer:
         logger.info("Deploying servers...")
         self.state_manager.update_phase("deploying_servers")
         
+        # Ensure deployer sees latest images from state (create_images writes them).
+        if self.state_manager.state:
+            self.server_deployer.images = self.state_manager.state.images
+
         instances = self.server_deployer.deploy_all()
         
         return instances
@@ -283,7 +308,7 @@ class ConfluxDeployer:
         
         if instances:
             # Update node manager with new instances
-            self._node_manager = NodeManager(self.config, instances, self.state_manager)
+            self._node_manager = NodeManager(self.config, instances, ssh_key_path=self.config.ssh_private_key_path)
         
         self.state_manager.update_phase("initializing_nodes")
         
@@ -325,9 +350,10 @@ class ConfluxDeployer:
             True if all nodes are ready
         """
         logger.info("Waiting for nodes to be ready...")
-        return self.node_manager.wait_for_nodes_ready(timeout=timeout)
+        results = self.node_manager.wait_for_nodes_ready(timeout_seconds=timeout)
+        return all(results.values()) if results else True
     
-    def connect_nodes(self) -> Dict[str, int]:
+    def connect_nodes(self) -> bool:
         """
         Connect all nodes in a mesh network.
         
@@ -335,7 +361,7 @@ class ConfluxDeployer:
             Dict mapping node_id to peer count
         """
         logger.info("Connecting nodes...")
-        return self.node_manager.connect_nodes()
+        return bool(self.node_manager.connect_nodes(connect_count=self.config.network.connect_peers))
     
     def collect_metrics(self) -> Dict[str, Any]:
         """
@@ -458,7 +484,7 @@ class ConfluxDeployer:
         from .configs import AWS_INSTANCE_SPECS, ALIBABA_INSTANCE_SPECS
 
         inv: List[Dict[str, Any]] = []
-        instances = self.server_deployer.list_instances()
+        instances = self.server_deployer.get_all_instances()
 
         # Ensure node list is initialized
         nodes = self.node_manager.initialize_nodes()
@@ -484,7 +510,9 @@ class ConfluxDeployer:
                 hw = ALIBABA_INSTANCE_SPECS.get(inst.instance_type)
 
             instance_id = getattr(inst, "instance_id", None)
-            node_objs = self.node_manager.list_nodes_by_instance(instance_id)
+            if not instance_id:
+                continue
+            node_objs = self.node_manager.list_nodes_by_instance(str(instance_id))
             node_list = [
                 {
                     "node_id": n.node_id,
@@ -539,7 +567,10 @@ class ConfluxDeployer:
         
         try:
             # Initialize state
-            self.state_manager.initialize(self.config.deployment_id)
+            deployment_id = self.config.deployment_id
+            if not deployment_id:
+                raise ValueError("deployment_id is required")
+            self.state_manager.initialize(str(deployment_id))
             
             # 1. Create images
             result["images"] = self.create_images()
@@ -561,8 +592,8 @@ class ConfluxDeployer:
             result["nodes"] = [
                 {
                     "node_id": n.node_id,
-                    "instance_id": n.instance_id,
-                    "rpc_port": n.rpc_port,
+                    "instance_id": n.instance_info.instance_id,
+                    "rpc_port": n.jsonrpc_port,
                     "p2p_port": n.p2p_port,
                 }
                 for n in nodes
@@ -605,15 +636,20 @@ class ConfluxDeployer:
         results = {}
         
         test_config = self.config.test
-        
-        if test_config.stress_test_enabled:
-            results["stress"] = self.run_stress_test(test_config.test_duration_seconds)
-        
-        if test_config.latency_test_enabled:
+
+        test_type = getattr(test_config, "test_type", "stress")
+        if test_type == "all":
+            results["stress"] = self.run_stress_test()
             results["latency"] = self.run_latency_test()
-        
-        if test_config.fork_test_enabled:
             results["fork"] = self.run_fork_test()
+        elif test_type == "stress":
+            results["stress"] = self.run_stress_test()
+        elif test_type == "latency":
+            results["latency"] = self.run_latency_test()
+        elif test_type == "fork":
+            results["fork"] = self.run_fork_test()
+        else:
+            results[str(test_type)] = self.run_custom_test(str(test_type))
         
         return results
     

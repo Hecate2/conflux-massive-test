@@ -567,6 +567,31 @@ class TestController:
             return result
         finally:
             self._current_test = None
+
+    def run_stress_test(self, duration_seconds: int = 300) -> TestResult:
+        """Compatibility wrapper for stress tests.
+
+        Note: the current StressTest implementation is block-count based;
+        duration_seconds is accepted for API compatibility.
+        """
+        _ = duration_seconds
+        return self.run_test("stress")
+
+    def run_latency_test(self, sample_count: int = 100) -> TestResult:
+        """Compatibility wrapper for latency tests.
+
+        sample_count is accepted for API compatibility.
+        """
+        _ = sample_count
+        return self.run_test("latency")
+
+    def run_fork_test(self, target_depth: int = 10) -> TestResult:
+        """Compatibility wrapper for fork tests.
+
+        target_depth is accepted for API compatibility.
+        """
+        _ = target_depth
+        return self.run_test("fork")
     
     def stop_test(self) -> None:
         """Stop the current test"""

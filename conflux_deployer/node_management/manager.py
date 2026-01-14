@@ -20,9 +20,7 @@ from loguru import logger
 from ..configs import (
     DeploymentConfig,
     InstanceInfo,
-    NodeInfo,
-    ConfluxNodeConfig,
-    NetworkConfig,
+    NodeInfo
 )
 from ..utils.remote import RemoteExecutor
 from .rpc import ConfluxRpcClient
@@ -32,11 +30,12 @@ from .rpc import ConfluxRpcClient
 class ConfluxTomlConfig:
     """Conflux node TOML configuration"""
     # Basic
-    mode: str = "full"
+    # Match legacy remote_simulation defaults
+    mode: str = "test"
     public_address: str = ""
     
     # Network
-    chain_id: int = 1
+    chain_id: int = 10
     tcp_port: int = 32323
     udp_port: int = 32323
     jsonrpc_http_port: int = 12537
@@ -59,7 +58,7 @@ class ConfluxTomlConfig:
     generate_tx: bool = False
     generate_tx_period_us: int = 100000
     genesis_secrets: Optional[str] = None
-    txgen_account_count: int = 1000
+    txgen_account_count: int = 100
     
     # Additional settings
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -187,8 +186,10 @@ class NodeManager:
             allocation_offset = block_index * ports_block
 
             for node_index in range(instance.nodes_count):
-                p2p_port = base_p2p + allocation_offset + node_index
-                jsonrpc_port = base_jsonrpc + allocation_offset + node_index
+                # Use 10-port stride per node, matching legacy remote_simulation.port_allocation
+                # and leaving room for related service ports.
+                p2p_port = base_p2p + allocation_offset + node_index * 10
+                jsonrpc_port = base_jsonrpc + allocation_offset + node_index * 10
 
                 node = NodeInfo(
                     node_id=f"node-{node_id}",
@@ -201,6 +202,108 @@ class NodeManager:
                 node_id += 1
 
         return nodes
+
+    @staticmethod
+    def _normalize_legacy_config_value(value: Any) -> Any:
+        """Normalize legacy config values from conflux/config.py-like dicts.
+
+        The legacy configs may encode strings as quoted strings (e.g. '"debug"' or "'./a.log'")
+        and booleans as strings ("true"/"false").
+        """
+        if isinstance(value, str):
+            v = value.strip()
+            if (v.startswith("\"") and v.endswith("\"")) or (v.startswith("'") and v.endswith("'")):
+                v = v[1:-1]
+            lower = v.lower()
+            if lower == "true":
+                return True
+            if lower == "false":
+                return False
+            return v
+        return value
+
+    def _legacy_remote_simulation_defaults(
+        self,
+        *,
+        jsonrpc_http_port: int,
+        p2p_port: int,
+        storage_memory_gb: int,
+        tx_pool_size: int,
+        generate_tx_period_us: int,
+    ) -> Dict[str, Any]:
+        """Return a dict compatible with legacy remote_simulation/config_builder.py.
+
+        This is used to ensure our TOML generator can emit all keys that the legacy
+        key=value generator can produce, using the same default values.
+        """
+        import conflux.config as legacy
+
+        # Start from legacy small_local_test_conf with normalized values.
+        defaults: Dict[str, Any] = {
+            k: self._normalize_legacy_config_value(v)
+            for k, v in legacy.small_local_test_conf.items()
+        }
+
+        # Legacy port layout (remote_simulation.port_allocation)
+        # base, base+1(local http), base+2(remote http), base+3(ws/pubsub), base+4(evm http), base+5(evm ws)
+        defaults.update(
+            {
+                "tcp_port": int(p2p_port),
+                "jsonrpc_local_http_port": int(jsonrpc_http_port) - 1,
+                "jsonrpc_http_port": int(jsonrpc_http_port),
+                "jsonrpc_ws_port": int(jsonrpc_http_port) + 1,
+                "jsonrpc_http_eth_port": int(jsonrpc_http_port) + 2,
+                "jsonrpc_ws_eth_port": int(jsonrpc_http_port) + 3,
+            }
+        )
+
+        # Defaults from remote_simulation.config_builder.ConfluxOptions
+        # (kept inline here to avoid importing remote_simulation at runtime)
+        defaults.update(
+            {
+                "egress_min_throttle": 512,
+                "egress_max_throttle": 1024,
+                "egress_queue_capacity": 2048,
+                "genesis_secrets": "./genesis_secrets.txt",
+                "log_file": "./log/conflux.log",
+                "metrics_output_file": "./log/metrics.log",
+                "send_tx_period_ms": 1300,
+                "txgen_account_count": 100,
+                "txgen_batch_size": 10,
+                "tx_pool_size": int(tx_pool_size),
+                "max_block_size_in_bytes": 200 * 1024,
+                "execution_prefetch_threads": 8,
+                "target_block_gas_limit": 30_000_000,
+                # PoS / Transition configurations
+                "cip1559_transition_height": 4294967295,
+                "hydra_transition_number": 4294967295,
+                "hydra_transition_height": 4294967295,
+                "pos_reference_enable_height": 4294967295,
+                "cip43_init_end_number": 4294967295,
+                "sigma_fix_transition_number": 4294967295,
+                "public_rpc_apis": "cfx,debug,test,pubsub,trace",
+            }
+        )
+
+        # Legacy _enact_node_config behavior
+        # Scale memory-related caches based on target_memory=16.
+        target_memory = 16
+        for k in [
+            "db_cache_size",
+            "ledger_cache_size",
+            "storage_delta_mpts_cache_size",
+            "storage_delta_mpts_cache_start_size",
+            "storage_delta_mpts_slab_idle_size",
+        ]:
+            defaults[k] = int(legacy.production_conf[k]) // target_memory * int(storage_memory_gb)
+        defaults["tx_pool_size"] = int(tx_pool_size) // target_memory * int(storage_memory_gb)
+
+        defaults["persist_tx_index"] = False
+        defaults["generate_tx"] = True
+        defaults["generate_tx_period_us"] = int(generate_tx_period_us)
+        defaults["enable_optimistic_execution"] = False
+
+        return defaults
 
     def list_nodes_by_instance(self, instance_id: str) -> List[NodeInfo]:
         """Return all nodes that belong to the specified instance."""
@@ -238,16 +341,29 @@ class NodeManager:
             ConfluxTomlConfig
         """
         base_config = self.config.conflux_node
-        
-        config = ConfluxTomlConfig(
-            public_address=f"{node.instance_info.public_ip}:{node.p2p_port}",
-            chain_id=base_config.chain_id,
-            tcp_port=node.p2p_port,
-            udp_port=node.p2p_port,
+
+        # Build legacy-compatible defaults first, then overlay deployer-specific settings.
+        legacy_defaults = self._legacy_remote_simulation_defaults(
             jsonrpc_http_port=node.jsonrpc_port,
-            jsonrpc_ws_port=node.jsonrpc_port + 1,
-            tx_pool_size=base_config.tx_pool_size,
+            p2p_port=node.p2p_port,
+            storage_memory_gb=int(getattr(base_config, "storage_memory_gb", 2)),
+            tx_pool_size=int(getattr(base_config, "tx_pool_size", 500000)),
+            generate_tx_period_us=int(tx_gen_period_us),
+        )
+
+        config = ConfluxTomlConfig(
+            mode=str(legacy_defaults.get("mode", "test")),
+            public_address=f"{node.instance_info.public_ip}:{node.p2p_port}",
+            chain_id=int(getattr(base_config, "chain_id", legacy_defaults.get("chain_id", 10))),
+            tcp_port=int(node.p2p_port),
+            udp_port=int(node.p2p_port),
+            jsonrpc_http_port=int(node.jsonrpc_port),
+            jsonrpc_ws_port=int(node.jsonrpc_port) + 1,
+            # Use legacy-scaled defaults unless explicitly overridden.
+            tx_pool_size=int(legacy_defaults.get("tx_pool_size", getattr(base_config, "tx_pool_size", 500000))),
             conflux_data_dir=f"/data/conflux/data/node_{node.node_index}",
+            db_cache_size=int(legacy_defaults.get("db_cache_size", 128)),
+            ledger_cache_size=int(legacy_defaults.get("ledger_cache_size", 1024)),
         )
         
         # Set bootnodes
@@ -261,12 +377,46 @@ class NodeManager:
         # Enable tx generation
         if enable_tx_gen:
             config.generate_tx = True
-            config.generate_tx_period_us = tx_gen_period_us
-            if self.config.network and self.config.network.genesis_secrets_path:
-                config.genesis_secrets = "/data/conflux/config/genesis_secrets.txt"
+            config.generate_tx_period_us = int(tx_gen_period_us)
+
+        # Keep legacy defaults for txgen-related fields.
+        config.txgen_account_count = int(legacy_defaults.get("txgen_account_count", config.txgen_account_count))
+
+        # Genesis secrets path: prefer deployed path if provided, else legacy default.
+        if self.config.network and self.config.network.genesis_secrets_path:
+            config.genesis_secrets = "/data/conflux/config/genesis_secrets.txt"
+        else:
+            config.genesis_secrets = str(legacy_defaults.get("genesis_secrets", "./genesis_secrets.txt"))
         
-        # Add extra config
-        config.extra.update(base_config.extra_config)
+        # Add legacy keys not represented by ConfluxTomlConfig fields.
+        reserved_keys = {
+            "mode",
+            "public_address",
+            "chain_id",
+            "tcp_port",
+            "udp_port",
+            "jsonrpc_http_port",
+            "jsonrpc_ws_port",
+            "bootnodes",
+            "tx_pool_size",
+            "conflux_data_dir",
+            "db_cache_size",
+            "ledger_cache_size",
+            "mining_author",
+            "start_mining",
+            "generate_tx",
+            "generate_tx_period_us",
+            "genesis_secrets",
+            "txgen_account_count",
+        }
+        for k, v in legacy_defaults.items():
+            if k in reserved_keys:
+                continue
+            config.extra[k] = v
+
+        # Allow user-provided overrides (normalize to avoid double-quoting legacy-style strings).
+        for k, v in getattr(base_config, "extra_config", {}).items():
+            config.extra[k] = self._normalize_legacy_config_value(v)
         
         return config
     

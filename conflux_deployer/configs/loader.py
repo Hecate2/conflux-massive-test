@@ -6,6 +6,7 @@ Handles loading, validating, and managing configurations from files.
 
 import json
 import os
+from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
@@ -246,8 +247,8 @@ class ConfigLoader:
 class StateManager:
     """Manages deployment state persistence for recovery"""
     
-    def __init__(self, state_file_path: str):
-        self.state_file_path = state_file_path
+    def __init__(self, state_file_path: str | Path):
+        self.state_file_path = str(state_file_path)
         self._state: Optional[DeploymentState] = None
     
     def initialize(self, deployment_id: str) -> DeploymentState:

@@ -8,7 +8,6 @@ Responsible for:
 - Managing image lifecycle
 """
 
-import base64
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
@@ -18,8 +17,6 @@ from loguru import logger
 from ..configs import (
     DeploymentConfig,
     CloudProvider,
-    ImageConfig,
-    InstanceInfo,
     InstanceState,
 )
 from ..cloud import (
@@ -265,6 +262,7 @@ class ImageManager:
         provider: CloudProvider, 
         region_id: str,
         wait_for_available: bool = True,
+        image_name: Optional[str] = None,
     ) -> ImageInfo:
         """
         Create a new image in the specified region.
@@ -284,7 +282,7 @@ class ImageManager:
             ImageInfo for the created image
         """
         cloud = self._get_provider(provider, region_id)
-        image_name = self._get_image_name(provider, region_id)
+        image_name = image_name or self._get_image_name(provider, region_id)
         region_key = f"{provider.value}:{region_id}"
         
         logger.info(f"Creating new image {image_name} in {provider.value}/{region_id}")
@@ -416,7 +414,7 @@ class ImageManager:
                 logger.warning(f"Failed to delete temp security group: {e}")
             del self._temp_security_groups[region_key]
     
-    def ensure_images_exist(self) -> Dict[str, Dict[str, str]]:
+    def ensure_images_exist(self, force_recreate: bool = False) -> Dict[str, Dict[str, str]]:
         """
         Ensure images exist in all required regions.
         
@@ -449,18 +447,20 @@ class ImageManager:
             
             for region_id in region_ids:
                 logger.info(f"Checking image for {provider.value}/{region_id}")
-                
-                # Try to find existing image
-                image = self.find_existing_image(provider, region_id)
-                
-                if image:
-                    images[provider_key][region_id] = image.image_id
-                    logger.info(f"Using existing image: {image.image_id}")
-                else:
-                    # Create new image
-                    logger.info(f"Creating new image for {provider.value}/{region_id}")
-                    image = self.create_image(provider, region_id)
-                    images[provider_key][region_id] = image.image_id
+
+                if not force_recreate:
+                    # Try to find existing image
+                    image = self.find_existing_image(provider, region_id)
+                    if image:
+                        images[provider_key][region_id] = image.image_id
+                        logger.info(f"Using existing image: {image.image_id}")
+                        continue
+
+                # Create new image (use unique name to avoid cloud-side name collisions)
+                logger.info(f"Creating new image for {provider.value}/{region_id}")
+                unique_name = f"{self._get_image_name(provider, region_id)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                image = self.create_image(provider, region_id, image_name=unique_name)
+                images[provider_key][region_id] = image.image_id
         
         return images
     

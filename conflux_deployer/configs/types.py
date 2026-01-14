@@ -177,7 +177,7 @@ class ConfluxNodeConfig:
     # Mining related
     mining_author: Optional[str] = None
     # Network ID
-    chain_id: int = 1
+    chain_id: int = 10
     # Additional config parameters
     extra_config: Dict[str, Any] = field(default_factory=dict)
     # Block size of ports reserved per instance (to avoid cross-instance collision)
@@ -250,6 +250,10 @@ class CleanupConfig:
     def auto_cleanup(self) -> bool:
         """Backward compatible alias for auto_terminate"""
         return self.auto_terminate
+
+    @auto_cleanup.setter
+    def auto_cleanup(self, value: bool) -> None:
+        self.auto_terminate = bool(value)
 
 
 @dataclass
