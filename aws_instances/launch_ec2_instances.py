@@ -218,7 +218,7 @@ class Instances:
         
         self.ip_addresses = ips
 
-    def remote_execute(self, script_path: str, args: List[str] = None):
+    def remote_execute(self, script_path: str, args: Optional[List[str]] = None):
         if args is None:
             args = list()
 

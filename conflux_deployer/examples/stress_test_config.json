@@ -1,0 +1,103 @@
+{
+    "deployment_id": "conflux-stress-test-001",
+    "instance_name_prefix": "conflux-node",
+    
+    "credentials": {
+        "aws": {
+            "access_key_id": "YOUR_AWS_ACCESS_KEY_ID",
+            "secret_access_key": "YOUR_AWS_SECRET_ACCESS_KEY",
+            "key_pair_name": "conflux-test-keypair",
+            "key_pair_path": "~/.ssh/conflux-test-keypair.pem"
+        },
+        "alibaba": {
+            "access_key_id": "YOUR_ALIBABA_ACCESS_KEY_ID",
+            "secret_access_key": "YOUR_ALIBABA_SECRET_ACCESS_KEY",
+            "key_pair_name": "conflux-test-keypair",
+            "key_pair_path": "~/.ssh/conflux-test-keypair-alibaba.pem"
+        }
+    },
+    
+    "regions": [
+        {
+            "provider": "aws",
+            "region_id": "us-west-2",
+            "instance_count": 5,
+            "nodes_per_instance": 1,
+            "instance_type": "m6i.2xlarge"
+        },
+        {
+            "provider": "aws",
+            "region_id": "us-east-1",
+            "instance_count": 5,
+            "nodes_per_instance": 1,
+            "instance_type": "m6i.2xlarge"
+        },
+        {
+            "provider": "aws",
+            "region_id": "eu-west-1",
+            "instance_count": 3,
+            "nodes_per_instance": 1,
+            "instance_type": "m6i.2xlarge"
+        },
+        {
+            "provider": "aws",
+            "region_id": "ap-northeast-1",
+            "instance_count": 3,
+            "nodes_per_instance": 1,
+            "instance_type": "m6i.2xlarge"
+        },
+        {
+            "provider": "alibaba",
+            "region_id": "cn-hangzhou",
+            "instance_count": 4,
+            "nodes_per_instance": 1,
+            "instance_type": "ecs.g7.2xlarge"
+        }
+    ],
+    
+    "image": {
+        "name": "conflux-node-v1",
+        "conflux_image": "confluxchain/conflux-rust:latest",
+        "base_image": "ubuntu:22.04",
+        "reuse_existing": true,
+        "install_monitoring": true
+    },
+    
+    "conflux_node": {
+        "chain_id": 1,
+        "log_level": "info",
+        "mining_enabled": true,
+        "stratum_listen_address": "127.0.0.1",
+        "stratum_port": 32525,
+        "bootnodes": [],
+        "additional_config": {
+            "blocks_request_timeout_ms": 20000,
+            "headers_request_timeout_ms": 10000,
+            "tx_maintained_for_peer_timeout_ms": 600000
+        }
+    },
+    
+    "network": {
+        "p2p_port_base": 32323,
+        "rpc_port_base": 12537,
+        "connect_all": true,
+        "mesh_topology": true,
+        "debug_mode": false
+    },
+    
+    "test": {
+        "stress_test_enabled": true,
+        "latency_test_enabled": true,
+        "fork_test_enabled": false,
+        "test_duration_seconds": 600,
+        "tps_target": 3000,
+        "block_generation_interval_ms": 250
+    },
+    
+    "cleanup": {
+        "auto_cleanup": true,
+        "delete_images": false,
+        "grace_period_seconds": 60,
+        "retry_attempts": 5
+    }
+}

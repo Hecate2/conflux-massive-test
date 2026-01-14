@@ -1,0 +1,102 @@
+{
+  "cloud_accounts": {
+    "aws": {
+      "default": {
+        "access_key": "YOUR_AWS_ACCESS_KEY",
+        "secret_key": "YOUR_AWS_SECRET_KEY"
+      }
+    },
+    "alibaba": {
+      "default": {
+        "access_key": "YOUR_ALIBABA_ACCESS_KEY",
+        "secret_key": "YOUR_ALIBABA_SECRET_KEY"
+      }
+    }
+  },
+  "instance_configs": {
+    "m6i.2xlarge": {
+      "base_image_id": "ami-0c55b159cbfafe1f0",
+      "key_name": "your-key-pair",
+      "security_group_ids": ["sg-12345678"],
+      "subnet_id": "subnet-12345678",
+      "volume_size": 100,
+      "alternative_instance_type": "m7i.2xlarge"
+    },
+    "m7i.2xlarge": {
+      "base_image_id": "ami-0c55b159cbfafe1f0",
+      "key_name": "your-key-pair",
+      "security_group_ids": ["sg-12345678"],
+      "subnet_id": "subnet-12345678",
+      "volume_size": 100,
+      "alternative_instance_type": "m7i.4xlarge"
+    },
+    "m6i.4xlarge": {
+      "base_image_id": "ami-0c55b159cbfafe1f0",
+      "key_name": "your-key-pair",
+      "security_group_ids": ["sg-12345678"],
+      "subnet_id": "subnet-12345678",
+      "volume_size": 200,
+      "alternative_instance_type": "m7i.4xlarge"
+    },
+    "m7i.4xlarge": {
+      "base_image_id": "ami-0c55b159cbfafe1f0",
+      "key_name": "your-key-pair",
+      "security_group_ids": ["sg-12345678"],
+      "subnet_id": "subnet-12345678",
+      "volume_size": 200,
+      "alternative_instance_type": "m7i.8xlarge"
+    },
+    "ecs.c6.2xlarge": {
+      "base_image_id": "aliyun-ubuntu-20.04",
+      "key_name": "your-key-pair",
+      "security_group_ids": ["sg-12345678"],
+      "subnet_id": "subnet-12345678",
+      "volume_size": 100,
+      "alternative_instance_type": "ecs.c6.4xlarge"
+    }
+  },
+  "conflux": {
+    "base_port": 12537,
+    "base_rpc_port": 12539,
+    "base_p2p_port": 12538,
+    "node_config": {
+      "send_tx_period_ms": 200,
+      "tx_pool_size": 2000000,
+      "target_block_gas_limit": 120000000,
+      "max_block_size_in_bytes": 460800
+    }
+  },
+  "tests": {
+    "tps": {
+      "duration": 300,
+      "tx_rate": 1000
+    },
+    "latency": {
+      "duration": 300,
+      "tx_count": 1000
+    },
+    "stability": {
+      "duration": 3600
+    },
+    "stress": {
+      "duration": 600,
+      "max_tx_rate": 5000
+    }
+  },
+  "regions": {
+    "aws": [
+      "us-west-2",
+      "us-east-1",
+      "eu-west-1",
+      "ap-southeast-1",
+      "ap-northeast-1"
+    ],
+    "alibaba": [
+      "us-west-1",
+      "ap-northeast-1",
+      "ap-southeast-1",
+      "ap-southeast-2",
+      "eu-central-1"
+    ]
+  }
+}
