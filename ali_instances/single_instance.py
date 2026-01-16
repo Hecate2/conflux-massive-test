@@ -13,11 +13,10 @@ from ali_instances.ecs_common import (
 	delete_instance,
 	ensure_network_resources,
 	pick_system_disk_category,
+	pick_zone_and_instance_type,
 	start_instance,
 	wait_instance_running,
 	wait_instance_status,
-	_match_cpu_vendor,
-	_load_instance_type_map,
 ) 
 
 
@@ -56,59 +55,6 @@ class SingleInstanceHandle:
 	public_ip: str
 
 
-
-
-
-def pick_zone_and_instance_type(
-	client: EcsClient,
-	region_id: str,
-	cpu_cores: int,
-	memory_gb: float,
-	spot_strategy: Optional[str],
-	cpu_vendor: Optional[str],
-) -> tuple[str, str, Optional[str]]:
-	request = ecs_models.DescribeAvailableResourceRequest(
-		region_id=region_id,
-		destination_resource="InstanceType",
-		resource_type="instance",
-		instance_charge_type="PostPaid",
-		spot_strategy=spot_strategy,
-		cores=cpu_cores,
-		memory=memory_gb,
-	)
-	response = client.describe_available_resource(request)
-	zones = response.body.available_zones.available_zone if response.body and response.body.available_zones else []
-	for zone in zones:
-		if zone.status_category not in {"WithStock", "ClosedWithStock"}:
-			continue
-		resources = zone.available_resources.available_resource if zone.available_resources else []
-		instance_types: list[str] = []
-		for resource in resources:
-			if resource.type != "InstanceType":
-				continue
-			supported = resource.supported_resources.supported_resource if resource.supported_resources else []
-			for item in supported:
-				if item.status_category in {"WithStock", "ClosedWithStock"}:
-					instance_types.append(item.value)
-		type_map = _load_instance_type_map(client, instance_types)
-		candidates = [
-			item for item in type_map.values()
-			if item.cpu_core_count == cpu_cores
-			and item.memory_size is not None
-			and item.memory_size == memory_gb
-			and _match_cpu_vendor(item.physical_processor_model, cpu_vendor)
-		]
-		if not candidates:
-			continue
-		candidates.sort(key=lambda item: (item.memory_size, item.instance_type_id))
-		selected = candidates[0]
-		vendor = "intel" if "intel" in (selected.physical_processor_model or "").lower() else (
-			"amd" if "amd" in (selected.physical_processor_model or "").lower() else None
-		)
-		return zone.zone_id, selected.instance_type_id, vendor
-	raise RuntimeError("no in-stock instance type found")
-
-
 def create_instance(client: EcsClient, config: SingleInstanceConfig) -> str:
 	if not config.instance_type:
 		raise ValueError("instance_type is required for instance creation")
@@ -138,14 +84,18 @@ def create_instance(client: EcsClient, config: SingleInstanceConfig) -> str:
 
 def provision_single_instance(config: SingleInstanceConfig) -> SingleInstanceHandle:
 	client = create_client(config.credentials, config.region_id, config.endpoint)
-	zone_id, instance_type, vendor = pick_zone_and_instance_type(
+	selection = pick_zone_and_instance_type(
 		client,
 		config.region_id,
-		cpu_cores=4,
-		memory_gb=16.0,
+		min_cpu_cores=4,
+		min_memory_gb=16.0,
+		max_memory_gb=16.0,
 		spot_strategy=config.spot_strategy if config.use_spot else None,
 		cpu_vendor=config.cpu_vendor,
 	)
+	if not selection:
+		raise RuntimeError("no in-stock instance type found")
+	zone_id, instance_type, vendor = selection
 	zone_id, vswitch_id, security_group_id = ensure_network_resources(
 		client,
 		region_id=config.region_id,

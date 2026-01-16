@@ -1,70 +1,41 @@
 import argparse
 import asyncio
-import json
-import ipaddress
-import os
-import socket
-import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
 import asyncssh
-from dotenv import load_dotenv
 from loguru import logger
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_ecs20140526 import models as ecs_models
-from alibabacloud_tea_openapi.models import Config as AliyunConfig
 from utils.wait_until import wait_until
 from .ecs_common import (
+	DEFAULT_ENDPOINT,
+	AliCredentials,
+	create_client,
+	delete_instance,
+	load_ali_credentials,
+	load_endpoint,
 	pick_zone_id,
-	pick_system_disk_category,
+	pick_zone_and_instance_type,
 	ensure_vpc,
-	wait_vpc_available,
 	ensure_vswitch,
-	pick_available_vswitch_cidr,
-	wait_vswitch_available,
 	ensure_security_group,
-	security_group_allows_port,
-	_cidr_overlaps,
-	vswitch_exists,
-	security_group_exists,
 	start_instance,
 	stop_instance,
 	allocate_public_ip,
-	get_instance_public_ip,
-	get_instance_status,
 	wait_instance_running,
 	wait_instance_status,
 	wait_for_tcp_port_open,
-	delete_instance,
 	create_builder_instance,
 	ensure_key_pair,
-	ensure_private_key,
-	_match_cpu_vendor,
-	_load_instance_type_map,
-) 
+)
 
-
-
-DEFAULT_REGION_ID = "ap-southeast-3"
-DEFAULT_CONFLUX_GIT_REF = "v3.0.2"
-DEFAULT_REMOTE_CONFIG_DIR = "/opt/conflux/config"
-DEFAULT_VPC_NAME = "conflux-image-builder"
-DEFAULT_VSWITCH_NAME = "conflux-image-builder"
 DEFAULT_SECURITY_GROUP_NAME = "conflux-image-builder"
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
 DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
 DEFAULT_KEYPAIR_NAME = "chenxinghao-conflux-image-builder"
 DEFAULT_SSH_PRIVATE_KEY = "./keys/chenxinghao-conflux-image-builder.pem"
-DEFAULT_ENDPOINT = "cloudcontrol.aliyuncs.com"
-
-
-@dataclass(frozen=True)
-class AliCredentials:
-	access_key_id: str
-	access_key_secret: str
 
 
 @dataclass(frozen=True)
@@ -74,40 +45,6 @@ class ImageSource:
 
 
 from .image_config import ImageBuildConfig
-
-
-def load_ali_credentials() -> AliCredentials:
-	load_dotenv()
-	access_key_id = os.getenv("ALI_ACCESS_KEY_ID", "").strip()
-	access_key_secret = os.getenv("ALI_ACCESS_KEY_SECRET", "").strip()
-	if not access_key_id or not access_key_secret:
-		raise ValueError("Missing ALI_ACCESS_KEY_ID or ALI_ACCESS_KEY_SECRET in .env")
-	return AliCredentials(access_key_id=access_key_id, access_key_secret=access_key_secret)
-
-
-
-def load_endpoint() -> Optional[str]:
-	value = os.getenv("ALI_ECS_ENDPOINT", "").strip()
-	return value or DEFAULT_ENDPOINT
-
-
-def normalize_endpoint(region_id: str, endpoint: Optional[str]) -> Optional[str]:
-	if not endpoint:
-		return None
-	if "cloudcontrol.aliyuncs.com" in endpoint:
-		return f"ecs.{region_id}.aliyuncs.com"
-	return endpoint
-
-
-def create_client(credentials: AliCredentials, region_id: str, endpoint: Optional[str] = None) -> EcsClient:
-	endpoint = normalize_endpoint(region_id, endpoint)
-	config = AliyunConfig(
-		access_key_id=credentials.access_key_id,
-		access_key_secret=credentials.access_key_secret,
-		region_id=region_id,
-		endpoint=endpoint,
-	)
-	return EcsClient(config)
 
 
 def build_image_name(image_prefix: str, conflux_git_ref: str) -> str:
@@ -122,47 +59,25 @@ def list_regions(client: EcsClient) -> Sequence[str]:
 	return [region.region_id for region in regions if region.region_id]
 
 
-# pick_zone_id is provided by ali_instances.ecs_common
-
-
-def pick_zone_and_instance_type(
-	client: EcsClient,
-	region_id: str,
-	min_cpu_cores: int,
-	min_memory_gb: float,
-	spot_strategy: Optional[str],
-) -> tuple[str, str]:
-	request = ecs_models.DescribeAvailableResourceRequest(
-		region_id=region_id,
-		destination_resource="InstanceType",
-		resource_type="instance",
-		instance_charge_type="PostPaid",
-		spot_strategy=spot_strategy,
-		cores=min_cpu_cores,
-		memory=min_memory_gb,
-	)
-	response = client.describe_available_resource(request)
-	if not response.body or not response.body.available_zones:
-		raise RuntimeError("no available zones for instance type")
-	for zone in response.body.available_zones.available_zone or []:
-		if zone.status_category not in {"WithStock", "ClosedWithStock"}:
-			continue
-		resources = zone.available_resources.available_resource if zone.available_resources else []
-		for resource in resources:
-			if resource.type != "InstanceType":
-				continue
-			supported = resource.supported_resources.supported_resource if resource.supported_resources else []
-			for item in supported:
-				if item.status_category in {"WithStock", "ClosedWithStock"}:
-					return zone.zone_id, item.value
-	raise RuntimeError("no in-stock instance type found")
-
-
 def ensure_network_resources(client: EcsClient, config: ImageBuildConfig) -> ImageBuildConfig:
 	zone_id = config.zone_id or pick_zone_id(client, config.region_id)
 	vpc_id = ensure_vpc(client, config.region_id, config.vpc_name, config.vpc_cidr)
-	vswitch_id = config.v_switch_id or ensure_vswitch(client, config.region_id, vpc_id, zone_id, config.vswitch_name, config.vswitch_cidr)
-	security_group_id = config.security_group_id or ensure_security_group(client, config.region_id, vpc_id, config.security_group_name)
+	vswitch_id = config.v_switch_id or ensure_vswitch(
+		client,
+		config.region_id,
+		vpc_id,
+		zone_id,
+		config.vswitch_name,
+		config.vswitch_cidr,
+		config.vpc_cidr,
+	)
+	security_group_id = config.security_group_id or ensure_security_group(
+		client,
+		config.region_id,
+		vpc_id,
+		config.security_group_name,
+		"conflux image builder",
+	)
 	return ImageBuildConfig(
 		credentials=config.credentials,
 		base_image_id=config.base_image_id,
@@ -243,57 +158,6 @@ def _extract_instance_types(response: ecs_models.DescribeAvailableResourceRespon
 				if item.status_category in {"WithStock", "ClosedWithStock"}:
 					result.append(item.value)
 	return result
-
-
-def pick_zone_and_instance_type(
-	client: EcsClient,
-	region_id: str,
-	min_cpu_cores: int,
-	min_memory_gb: float,
-	max_memory_gb: float,
-	spot_strategy: Optional[str],
-	cpu_vendor: Optional[str],
-) -> Optional[tuple[str, str, Optional[str]]]:
-	request = ecs_models.DescribeAvailableResourceRequest(
-		region_id=region_id,
-		destination_resource="InstanceType",
-		resource_type="instance",
-		instance_charge_type="PostPaid",
-		spot_strategy=spot_strategy,
-		cores=min_cpu_cores,
-		memory=min_memory_gb,
-	)
-	response = client.describe_available_resource(request)
-	zones = response.body.available_zones.available_zone if response.body and response.body.available_zones else []
-	for zone in zones:
-		if zone.status_category not in {"WithStock", "ClosedWithStock"}:
-			continue
-		resources = zone.available_resources.available_resource if zone.available_resources else []
-		instance_types: list[str] = []
-		for resource in resources:
-			if resource.type != "InstanceType":
-				continue
-			supported = resource.supported_resources.supported_resource if resource.supported_resources else []
-			for item in supported:
-				if item.status_category in {"WithStock", "ClosedWithStock"}:
-					instance_types.append(item.value)
-		type_map = _load_instance_type_map(client, instance_types)
-		candidates = [
-			item for item in type_map.values()
-			if item.cpu_core_count == min_cpu_cores
-			and item.memory_size is not None
-			and min_memory_gb <= item.memory_size <= max_memory_gb
-			and _match_cpu_vendor(item.physical_processor_model, cpu_vendor)
-		]
-		if not candidates:
-			continue
-		candidates.sort(key=lambda item: (item.memory_size, item.instance_type_id))
-		selected = candidates[0]
-		vendor = "intel" if "intel" in (selected.physical_processor_model or "").lower() else (
-			"amd" if "amd" in (selected.physical_processor_model or "").lower() else None
-		)
-		return zone.zone_id, selected.instance_type_id, vendor
-	return None
 
 
 def pick_instance_type(
@@ -445,30 +309,6 @@ async def inject_conflux_config(
 	) as conn:
 		await conn.run(f"sudo mkdir -p {remote_config_dir}", check=True)
 		await asyncssh.scp(local_path, (conn, remote_config_dir), recursive=True)
-
-
-def delete_instance(client: EcsClient, region_id: str, instance_id: str) -> None:
-	status = wait_instance_status(
-		client,
-		region_id,
-		instance_id,
-		["Stopped", "Running"],
-		poll_interval=3,
-		timeout=180,
-	)
-	if status == "Running":
-		request = ecs_models.StopInstanceRequest(instance_id=instance_id, force_stop=True, stopped_mode="StopCharging")
-		client.stop_instance(request)
-		wait_instance_status(
-			client,
-			region_id,
-			instance_id,
-			["Stopped"],
-			poll_interval=3,
-			timeout=180,
-		)
-	request = ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True, force_stop=True)
-	client.delete_instance(request)
 
 
 def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
@@ -671,7 +511,13 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		return image_id
 	finally:
 		if config.cleanup_builder_instance and instance_id:
-			delete_instance(client, config.region_id, instance_id)
+			delete_instance(
+				client,
+				config.region_id,
+				instance_id,
+				poll_interval=config.poll_interval,
+				timeout=config.wait_timeout,
+			)
 			logger.info(f"builder instance deleted: {instance_id}")
 
 

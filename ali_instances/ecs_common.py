@@ -207,10 +207,6 @@ def delete_instance(
 	status = get_instance_status(client, region_id, instance_id)
 	if not status:
 		return
-	if status != "Stopped":
-		request = ecs_models.StopInstanceRequest(instance_id=instance_id, force_stop=True, stopped_mode="StopCharging")
-		client.stop_instance(request)
-		wait_instance_status(client, region_id, instance_id, ["Stopped"], poll_interval, timeout)
 	delete_request = ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True, force_stop=True)
 	client.delete_instance(delete_request)
 
@@ -281,6 +277,57 @@ def _load_instance_type_map(client: EcsClient, instance_type_ids: list[str]) -> 
 	response = client.describe_instance_types(request)
 	items = response.body.instance_types.instance_type if response.body and response.body.instance_types else []
 	return {item.instance_type_id: item for item in items if item.instance_type_id} 
+
+
+def pick_zone_and_instance_type(
+	client: EcsClient,
+	region_id: str,
+	min_cpu_cores: int,
+	min_memory_gb: float,
+	max_memory_gb: float,
+	spot_strategy: Optional[str],
+	cpu_vendor: Optional[str],
+) -> Optional[tuple[str, str, Optional[str]]]:
+	request = ecs_models.DescribeAvailableResourceRequest(
+		region_id=region_id,
+		destination_resource="InstanceType",
+		resource_type="instance",
+		instance_charge_type="PostPaid",
+		spot_strategy=spot_strategy,
+		cores=min_cpu_cores,
+		memory=min_memory_gb,
+	)
+	response = client.describe_available_resource(request)
+	zones = response.body.available_zones.available_zone if response.body and response.body.available_zones else []
+	for zone in zones:
+		if zone.status_category not in {"WithStock", "ClosedWithStock"}:
+			continue
+		resources = zone.available_resources.available_resource if zone.available_resources else []
+		instance_types: list[str] = []
+		for resource in resources:
+			if resource.type != "InstanceType":
+				continue
+			supported = resource.supported_resources.supported_resource if resource.supported_resources else []
+			for item in supported:
+				if item.status_category in {"WithStock", "ClosedWithStock"}:
+					instance_types.append(item.value)
+		type_map = _load_instance_type_map(client, instance_types)
+		candidates = [
+			item for item in type_map.values()
+			if item.cpu_core_count == min_cpu_cores
+			and item.memory_size is not None
+			and min_memory_gb <= item.memory_size <= max_memory_gb
+			and _match_cpu_vendor(item.physical_processor_model, cpu_vendor)
+		]
+		if not candidates:
+			continue
+		candidates.sort(key=lambda item: (item.memory_size, item.instance_type_id))
+		selected = candidates[0]
+		vendor = "intel" if "intel" in (selected.physical_processor_model or "").lower() else (
+			"amd" if "amd" in (selected.physical_processor_model or "").lower() else None
+		)
+		return zone.zone_id, selected.instance_type_id, vendor
+	return None
 
 
 def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str, name: str, cidr_block: str, vpc_cidr: str) -> str:
