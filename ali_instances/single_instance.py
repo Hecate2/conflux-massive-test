@@ -16,7 +16,9 @@ from ali_instances.ecs_common import (
 	start_instance,
 	wait_instance_running,
 	wait_instance_status,
-)
+	_match_cpu_vendor,
+	_load_instance_type_map,
+) 
 
 
 @dataclass(frozen=True)
@@ -54,24 +56,7 @@ class SingleInstanceHandle:
 	public_ip: str
 
 
-def _match_cpu_vendor(model: Optional[str], vendor: Optional[str]) -> bool:
-	if not vendor:
-		return True
-	if not model:
-		return False
-	return vendor.lower() in model.lower()
 
-
-def _load_instance_type_map(
-	client: EcsClient,
-	instance_type_ids: list[str],
-) -> dict[str, ecs_models.DescribeInstanceTypesResponseBodyInstanceTypesInstanceType]:
-	if not instance_type_ids:
-		return {}
-	request = ecs_models.DescribeInstanceTypesRequest(instance_types=instance_type_ids)
-	response = client.describe_instance_types(request)
-	items = response.body.instance_types.instance_type if response.body and response.body.instance_types else []
-	return {item.instance_type_id: item for item in items if item.instance_type_id}
 
 
 def pick_zone_and_instance_type(
