@@ -117,7 +117,7 @@ def build_single_node_conflux_config_text(node_config: ConfluxNodeConfig) -> str
             "hydra_transition_number": 5,
             "hydra_transition_height": 5,
             "cip43_init_end_number": 5,
-            "pos_reference_enable_height": 5,
+            "pos_reference_enable_height": 0,
             "dao_vote_transition_number": 6,
             "dao_vote_transition_height": 6,
             "sigma_fix_transition_number": 6,

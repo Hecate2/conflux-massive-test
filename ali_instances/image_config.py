@@ -13,7 +13,7 @@ DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
 DEFAULT_ENDPOINT = "cloudcontrol.aliyuncs.com"
 
 
-@dataclass(frozen=True)
+@dataclass
 class ImageBuildConfig:
     credentials: object
     base_image_id: Optional[str]

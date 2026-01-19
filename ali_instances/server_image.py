@@ -2,7 +2,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Callable, Coroutine, Optional, Sequence
 
 import asyncssh
 from loguru import logger
@@ -36,6 +36,7 @@ DEFAULT_VPC_CIDR = "10.0.0.0/16"
 DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
 DEFAULT_KEYPAIR_NAME = "chenxinghao-conflux-image-builder"
 DEFAULT_SSH_PRIVATE_KEY = "./keys/chenxinghao-conflux-image-builder.pem"
+DEFAULT_REMOTE_CONFIG_DIR = "/opt/conflux/config"
 
 
 @dataclass(frozen=True)
@@ -78,38 +79,10 @@ def ensure_network_resources(client: EcsClient, config: ImageBuildConfig) -> Ima
 		config.security_group_name,
 		"conflux image builder",
 	)
-	return ImageBuildConfig(
-		credentials=config.credentials,
-		base_image_id=config.base_image_id,
-		instance_type=config.instance_type,
-		min_cpu_cores=config.min_cpu_cores,
-		min_memory_gb=config.min_memory_gb,
-		max_memory_gb=config.max_memory_gb,
-		cpu_vendor=config.cpu_vendor,
-		v_switch_id=vswitch_id,
-		security_group_id=security_group_id,
-		key_pair_name=config.key_pair_name,
-		conflux_git_ref=config.conflux_git_ref,
-		region_id=config.region_id,
-		zone_id=zone_id,
-		endpoint=config.endpoint,
-		image_prefix=config.image_prefix,
-		instance_name_prefix=config.instance_name_prefix,
-		internet_max_bandwidth_out=config.internet_max_bandwidth_out,
-		ssh_username=config.ssh_username,
-		ssh_private_key_path=config.ssh_private_key_path,
-		poll_interval=config.poll_interval,
-		wait_timeout=config.wait_timeout,
-		cleanup_builder_instance=config.cleanup_builder_instance,
-		search_all_regions=config.search_all_regions,
-		use_spot=config.use_spot,
-		spot_strategy=config.spot_strategy,
-		vpc_name=config.vpc_name,
-		vswitch_name=config.vswitch_name,
-		security_group_name=config.security_group_name,
-		vpc_cidr=config.vpc_cidr,
-		vswitch_cidr=config.vswitch_cidr,
-	)
+	config.zone_id = zone_id
+	config.v_switch_id = vswitch_id
+	config.security_group_id = security_group_id
+	return config
 
 
 def find_latest_ubuntu_image(client: EcsClient, region_id: str) -> str:
@@ -311,38 +284,15 @@ async def inject_conflux_config(
 		await asyncssh.scp(local_path, (conn, remote_config_dir), recursive=True)
 
 
-def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
+def create_server_image(
+	config: ImageBuildConfig,
+	dry_run: bool = False,
+	prepare_instance_fn: Callable[[str, ImageBuildConfig], Coroutine[Any, Any, None]] = prepare_instance,
+) -> str:
 	image_name = build_image_name(config.image_prefix, config.conflux_git_ref)
 	client = create_client(config.credentials, config.region_id, config.endpoint)
 	if not config.base_image_id:
-		config = ImageBuildConfig(
-			credentials=config.credentials,
-			base_image_id=find_latest_ubuntu_image(client, config.region_id),
-			instance_type=config.instance_type,
-			v_switch_id=config.v_switch_id,
-			security_group_id=config.security_group_id,
-			key_pair_name=config.key_pair_name,
-			conflux_git_ref=config.conflux_git_ref,
-			region_id=config.region_id,
-			zone_id=config.zone_id,
-			endpoint=config.endpoint,
-			image_prefix=config.image_prefix,
-			instance_name_prefix=config.instance_name_prefix,
-			internet_max_bandwidth_out=config.internet_max_bandwidth_out,
-			ssh_username=config.ssh_username,
-			ssh_private_key_path=config.ssh_private_key_path,
-			poll_interval=config.poll_interval,
-			wait_timeout=config.wait_timeout,
-			cleanup_builder_instance=config.cleanup_builder_instance,
-			search_all_regions=config.search_all_regions,
-			use_spot=config.use_spot,
-			spot_strategy=config.spot_strategy,
-			vpc_name=config.vpc_name,
-			vswitch_name=config.vswitch_name,
-			security_group_name=config.security_group_name,
-			vpc_cidr=config.vpc_cidr,
-			vswitch_cidr=config.vswitch_cidr,
-		)
+		config.base_image_id = find_latest_ubuntu_image(client, config.region_id)
 
 	existing_image_id = find_existing_image(client, config.region_id, image_name)
 	if existing_image_id:
@@ -379,7 +329,8 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		)
 		return f"dry-run:{image_name}"
 
-	memory_ranges = [(2.0, 2.0), (4.0, 4.0)]
+	max_memory = config.max_memory_gb if config.max_memory_gb >= config.min_memory_gb else config.min_memory_gb
+	memory_ranges = [(config.min_memory_gb, max_memory)]
 	spot_strategy = config.spot_strategy if config.use_spot else None
 	selection = None
 	for min_mem, max_mem in memory_ranges:
@@ -412,38 +363,10 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		raise RuntimeError("no in-stock instance type found")
 	zone_id, selected_type, vendor = selection
 	use_spot = spot_strategy is not None
-	config = ImageBuildConfig(
-		credentials=config.credentials,
-		base_image_id=config.base_image_id,
-		instance_type=selected_type,
-		min_cpu_cores=config.min_cpu_cores,
-		min_memory_gb=config.min_memory_gb,
-		max_memory_gb=config.max_memory_gb,
-		cpu_vendor=vendor or config.cpu_vendor,
-		v_switch_id=config.v_switch_id,
-		security_group_id=config.security_group_id,
-		key_pair_name=config.key_pair_name,
-		conflux_git_ref=config.conflux_git_ref,
-		region_id=config.region_id,
-		zone_id=zone_id,
-		endpoint=config.endpoint,
-		image_prefix=config.image_prefix,
-		instance_name_prefix=config.instance_name_prefix,
-		internet_max_bandwidth_out=config.internet_max_bandwidth_out,
-		ssh_username=config.ssh_username,
-		ssh_private_key_path=config.ssh_private_key_path,
-		poll_interval=config.poll_interval,
-		wait_timeout=config.wait_timeout,
-		cleanup_builder_instance=config.cleanup_builder_instance,
-		search_all_regions=config.search_all_regions,
-		use_spot=use_spot,
-		spot_strategy=config.spot_strategy,
-		vpc_name=config.vpc_name,
-		vswitch_name=config.vswitch_name,
-		security_group_name=config.security_group_name,
-		vpc_cidr=config.vpc_cidr,
-		vswitch_cidr=config.vswitch_cidr,
-	)
+	config.instance_type = selected_type
+	config.zone_id = zone_id
+	config.cpu_vendor = vendor or config.cpu_vendor
+	config.use_spot = use_spot
 	config = ensure_network_resources(client, config)
 	ensure_key_pair(client, config.region_id, config.key_pair_name, config.ssh_private_key_path)
 
@@ -469,11 +392,11 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 			config.poll_interval,
 			config.wait_timeout,
 		)
-		allocate_public_ip(client, instance_id)
+		allocate_public_ip(client, config.region_id, instance_id)
 		public_ip = wait_instance_running(client, config.region_id, instance_id, config.poll_interval, config.wait_timeout)
 		logger.info(f"builder instance ready: {public_ip}")
 
-		asyncio.run(prepare_instance(public_ip, config))
+		asyncio.run(prepare_instance_fn(public_ip, config))
 		logger.info("stopping builder instance before image creation")
 		stop_instance(client, instance_id, "StopCharging")
 		wait_instance_status(
@@ -511,14 +434,17 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		return image_id
 	finally:
 		if config.cleanup_builder_instance and instance_id:
-			delete_instance(
-				client,
-				config.region_id,
-				instance_id,
-				poll_interval=config.poll_interval,
-				timeout=config.wait_timeout,
-			)
-			logger.info(f"builder instance deleted: {instance_id}")
+			try:
+				delete_instance(
+					client,
+					config.region_id,
+					instance_id,
+					poll_interval=config.poll_interval,
+					timeout=config.wait_timeout,
+				)
+				logger.info(f"builder instance deleted: {instance_id}")
+			except Exception as exc:
+				logger.warning(f"failed to delete builder instance {instance_id}: {exc}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

@@ -42,10 +42,7 @@ ENV RUSTFLAGS="-g"
 ENV CXXFLAGS="-Wno-error=array-bounds -Wno-error"
 ENV CFLAGS="-Wno-error=array-bounds -Wno-error"
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/src/conflux-rust/target \
-    cargo build --release && \
+RUN cargo build --release && \
     cp -r /usr/src/conflux-rust/target/release /tmp/release
 
 # Stage 2: Runtime environment

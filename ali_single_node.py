@@ -110,7 +110,7 @@ def send_evm_transaction(url: str, chain_id: int) -> str:
     return tx_hash
 
 
-def wait_for_evm_receipt(url: str, tx_hash: str, timeout: int = 180, interval: int = 2) -> None:
+def wait_for_evm_receipt(url: str, tx_hash: str, timeout: int = 180, interval: int = 2) -> dict:
     receipt_holder: dict[str, object] = {}
 
     def has_receipt() -> bool:
@@ -122,6 +122,7 @@ def wait_for_evm_receipt(url: str, tx_hash: str, timeout: int = 180, interval: i
 
     wait_until(has_receipt, timeout=timeout, retry_interval=interval)
     logger.info("evm transaction receipt found")
+    return receipt_holder.get("receipt") or {}
 
 
 def generate_test_block(url: str) -> None:
@@ -149,8 +150,19 @@ def check_transaction_processing(
         return
 
     logger.warning("no conflux transactions found; sending evm transaction")
-    tx_hash = send_evm_transaction(evm_url, evm_chain_id)
-    wait_for_evm_receipt(evm_url, tx_hash, timeout=180)
+    try:
+        tx_hash = send_evm_transaction(evm_url, evm_chain_id)
+        receipt = wait_for_evm_receipt(evm_url, tx_hash, timeout=180)
+        receipt_status = receipt.get("status")
+        receipt_block = receipt.get("blockNumber")
+        if receipt_block and receipt_status != "0x0":
+            logger.info(f"evm transaction confirmed in block {receipt_block}")
+            return
+    except RuntimeError as exc:
+        if "Method not found" in str(exc):
+            logger.warning("evm rpc not available; falling back to test block generation")
+        else:
+            raise
 
     generate_test_block(url)
     wait_for_epoch_increase(host, port, delta=2, timeout=180)
@@ -264,6 +276,62 @@ async def stop_conflux_node(host: str, instance: SingleInstanceConfig) -> None:
         await conn.run("sudo pkill -f 'conflux_0.toml' 2>/dev/null || true", check=False)
 
 
+async def start_docker_conflux_service(host: str, instance: SingleInstanceConfig, service_name: str) -> None:
+    await wait_for_ssh_ready(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
+    key_path = str(Path(instance.ssh_private_key_path).expanduser())
+    async with asyncssh.connect(
+        host,
+        username=instance.ssh_username,
+        client_keys=[key_path],
+        known_hosts=None,
+    ) as conn:
+        setup_cmd = (
+            "sudo bash -lc 'set -e; "
+            f"if [ ! -f /etc/systemd/system/{service_name}.service ]; then "
+            "cat > /usr/local/bin/"
+            f"{service_name}-run.sh << \"EOF\"\n"
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"docker rm -f {service_name} >/dev/null 2>&1 || true\n"
+            "exec docker run --rm \\\n  --name "
+            f"{service_name} \\\n  --net=host \\\n  --privileged \\\n  --ulimit nofile=65535:65535 \\\n  --ulimit nproc=65535:65535 \\\n  --ulimit core=-1 \\\n  -v /opt/conflux/config:/opt/conflux/config \\\n  -v /opt/conflux/data:/opt/conflux/data \\\n  -v /opt/conflux/logs:/opt/conflux/logs \\\n  -v /opt/conflux/pos_config:/opt/conflux/pos_config \\\n  -v /opt/conflux/pos_config:/app/pos_config \\\n  -w /opt/conflux/logs \\\n  conflux-single-node:latest \\\n  /root/conflux --config /opt/conflux/config/conflux_0.toml\n"
+            "EOF\n"
+            f"chmod +x /usr/local/bin/{service_name}-run.sh; "
+            "cat > /etc/systemd/system/"
+            f"{service_name}.service << \"EOF\"\n"
+            "[Unit]\n"
+            f"Description=Conflux single node ({service_name})\n"
+            "After=docker.service\n"
+            "Requires=docker.service\n\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart=/usr/local/bin/{service_name}-run.sh\n"
+            f"ExecStop=/usr/bin/docker stop {service_name}\n"
+            "Restart=always\n"
+            "RestartSec=5\n\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+            "EOF\n"
+            "systemctl daemon-reload; "
+            f"systemctl enable {service_name}.service; "
+            "fi'"
+        )
+        await conn.run(setup_cmd, check=False)
+        await conn.run(f"sudo systemctl start {service_name}.service", check=False)
+        await conn.run(f"sudo systemctl status {service_name}.service --no-pager", check=False)
+
+
+async def stop_docker_conflux_service(host: str, instance: SingleInstanceConfig, service_name: str) -> None:
+    key_path = str(Path(instance.ssh_private_key_path).expanduser())
+    async with asyncssh.connect(
+        host,
+        username=instance.ssh_username,
+        client_keys=[key_path],
+        known_hosts=None,
+    ) as conn:
+        await conn.run(f"sudo systemctl stop {service_name}.service", check=False)
+
+
 def authorize_instance_ports(instance, node: ConfluxNodeConfig) -> None:
     if not instance.config.security_group_id:
         raise RuntimeError("missing security_group_id after provisioning")
@@ -303,6 +371,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evm-chain-id", type=int, default=DEFAULT_EVM_CHAIN_ID)
     parser.add_argument("--conflux-bin", default=DEFAULT_CONFLUX_BIN, help="Path to conflux executable on the instance")
     parser.add_argument("--mining-author", default=None)
+    parser.add_argument("--no-docker-image", action="store_true", help="Run conflux directly on the instance")
+    parser.add_argument("--docker-service-name", default="conflux-docker")
     return parser
 
 
@@ -347,7 +417,11 @@ def main() -> None:
 
     instance = provision_single_instance(instance_config)
     authorize_instance_ports(instance, conflux_node)
-    asyncio.run(deploy_conflux_node(instance.public_ip, instance.config, conflux_node))
+    use_docker = not args.no_docker_image
+    if use_docker:
+        asyncio.run(start_docker_conflux_service(instance.public_ip, instance.config, args.docker_service_name))
+    else:
+        asyncio.run(deploy_conflux_node(instance.public_ip, instance.config, conflux_node))
     wait_for_rpc(instance.public_ip, conflux_node.rpc_port)
     check_block_production(instance.public_ip, conflux_node.rpc_port)
     check_transaction_processing(
@@ -358,7 +432,10 @@ def main() -> None:
         conflux_node.evm_chain_id,
     )
     logger.info("single node check finished")
-    asyncio.run(stop_conflux_node(instance.public_ip, instance.config))
+    if use_docker:
+        asyncio.run(stop_docker_conflux_service(instance.public_ip, instance.config, args.docker_service_name))
+    else:
+        asyncio.run(stop_conflux_node(instance.public_ip, instance.config))
     cleanup_single_instance(instance)
 
 
