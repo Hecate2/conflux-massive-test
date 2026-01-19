@@ -22,3 +22,18 @@ PYTHONPATH=. .venv/bin/python ali_single_node.py \
 - EVM transactions are sent via the EVM JSON-RPC port and confirmed via receipt polling.
 - Conflux RPC is used for block production checks and test block generation.
 - The script provisions and cleans up a single ECS instance automatically.
+
+### Testing with Docker (default) ✅
+
+By default the single-node test runs Conflux inside Docker on the remote instance. To run the Docker-based test (recommended):
+
+```bash
+PYTHONPATH=. .venv/bin/python ali_single_node.py \
+  --image-id m-8ps1sxkb1xxu1k4act4h \
+  --ssh-private-key ./keys/chenxinghao-conflux-image-builder.pem \
+  --region-id ap-southeast-3
+```
+
+To run Conflux directly on the instance (no Docker), pass `--no-docker-image`.
+
+Note: Spot instances are enabled by default. Use `--no-spot` to disable spot instances.

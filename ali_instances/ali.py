@@ -89,37 +89,37 @@ def client(creds: AliCredentials, region: str, endpoint: Optional[str] = None) -
     return EcsClient(AliyunConfig(access_key_id=creds.access_key_id, access_key_secret=creds.access_key_secret, region_id=region, endpoint=endpoint))
 
 
-def _inst_info(c: EcsClient, r: str, iid: str) -> tuple[Optional[str], Optional[str]]:
+def _instance_info(c: EcsClient, r: str, iid: str) -> tuple[Optional[str], Optional[str]]:
     resp = c.describe_instances(ecs_models.DescribeInstancesRequest(region_id=r, instance_ids=json.dumps([iid])))
-    insts = resp.body.instances.instance if resp.body and resp.body.instances else []
-    if not insts:
+    instances = resp.body.instances.instance if resp.body and resp.body.instances else []
+    if not instances:
         return None, None
-    ips = insts[0].public_ip_address.ip_address if insts[0].public_ip_address else []
-    return insts[0].status, ips[0] if ips else None
+    ips = instances[0].public_ip_address.ip_address if instances[0].public_ip_address else []
+    return instances[0].status, ips[0] if ips else None
 
 
 def wait_status(c: EcsClient, r: str, iid: str, want: Sequence[str], poll: int, timeout: int) -> str:
     h = {"s": None}
-    def chk(): h["s"], _ = _inst_info(c, r, iid); return h["s"] in want
+    def chk(): h["s"], _ = _instance_info(c, r, iid); return h["s"] in want
     wait_until(chk, timeout=timeout, retry_interval=poll)
     return h["s"] or ""
 
 
 def wait_running(c: EcsClient, r: str, iid: str, poll: int, timeout: int) -> str:
     h = {"ip": None}
-    def chk(): s, ip = _inst_info(c, r, iid); h["ip"] = ip; logger.info(f"{iid}: {s}, ip={ip}"); return s == "Running" and bool(ip)
+    def chk(): s, ip = _instance_info(c, r, iid); h["ip"] = ip; logger.info(f"{iid}: {s}, ip={ip}"); return s == "Running" and bool(ip)
     wait_until(chk, timeout=timeout, retry_interval=poll)
     return h["ip"] or ""
 
 
-def start_inst(c: EcsClient, iid: str) -> None: c.start_instance(ecs_models.StartInstanceRequest(instance_id=iid))
-def stop_inst(c: EcsClient, iid: str, mode: Optional[str] = None) -> None: c.stop_instance(ecs_models.StopInstanceRequest(instance_id=iid, force_stop=True, stopped_mode=mode))
-def delete_inst(c: EcsClient, r: str, iid: str) -> None:
-    s, _ = _inst_info(c, r, iid)
+def start_instance(c: EcsClient, iid: str) -> None: c.start_instance(ecs_models.StartInstanceRequest(instance_id=iid))
+def stop_instance(c: EcsClient, iid: str, mode: Optional[str] = None) -> None: c.stop_instance(ecs_models.StopInstanceRequest(instance_id=iid, force_stop=True, stopped_mode=mode))
+def delete_instance(c: EcsClient, r: str, iid: str) -> None:
+    s, _ = _instance_info(c, r, iid)
     if s: c.delete_instance(ecs_models.DeleteInstanceRequest(instance_id=iid, force=True, force_stop=True))
 
 
-def alloc_ip(c: EcsClient, r: str, iid: str, poll: int = 3, timeout: int = 120) -> Optional[str]:
+def allocate_public_ip(c: EcsClient, r: str, iid: str, poll: int = 3, timeout: int = 120) -> Optional[str]:
     wait_status(c, r, iid, ["Running", "Stopped"], poll, timeout)
     resp = c.allocate_public_ip_address(ecs_models.AllocatePublicIpAddressRequest(instance_id=iid))
     return resp.body.ip_address if resp.body else None
@@ -138,17 +138,17 @@ def ensure_vpc(c: EcsClient, r: str, name: str, cidr: str) -> str:
         if v.vpc_name == name: return v.vpc_id
     cr = c.create_vpc(ecs_models.CreateVpcRequest(region_id=r, vpc_name=name, cidr_block=cidr))
     vid = cr.body.vpc_id
-    wait_until(lambda: _vpc_ok(c, r, vid), timeout=120, retry_interval=3)
+    wait_until(lambda: _vpc_available(c, r, vid), timeout=120, retry_interval=3)
     return vid
 
 
-def _vpc_ok(c: EcsClient, r: str, vid: str) -> bool:
+def _vpc_available(c: EcsClient, r: str, vid: str) -> bool:
     resp = c.describe_vpcs(ecs_models.DescribeVpcsRequest(region_id=r, vpc_id=vid))
     vpcs = resp.body.vpcs.vpc if resp.body and resp.body.vpcs else []
     return vpcs and vpcs[0].status == "Available"
 
 
-def ensure_vsw(c: EcsClient, r: str, vpc: str, zone: str, name: str, cidr: str, vpc_cidr: str) -> str:
+def ensure_vswitch(c: EcsClient, r: str, vpc: str, zone: str, name: str, cidr: str, vpc_cidr: str) -> str:
     resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, vpc_id=vpc, page_size=50))
     vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
     for v in vsws:
@@ -161,11 +161,11 @@ def ensure_vsw(c: EcsClient, r: str, vpc: str, zone: str, name: str, cidr: str, 
             if all(not sub.overlaps(u) for u in used): cidr = str(sub); break
     cr = c.create_vswitch(ecs_models.CreateVSwitchRequest(region_id=r, vpc_id=vpc, zone_id=zone, v_switch_name=name, cidr_block=cidr))
     vsid = cr.body.v_switch_id
-    wait_until(lambda: _vsw_ok(c, r, vsid), timeout=120, retry_interval=3)
+    wait_until(lambda: _vswitch_ok(c, r, vsid), timeout=120, retry_interval=3)
     return vsid
 
 
-def _vsw_ok(c: EcsClient, r: str, vsid: str) -> bool:
+def _vswitch_ok(c: EcsClient, r: str, vsid: str) -> bool:
     resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=vsid))
     vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
     return vsws and vsws[0].status == "Available"
@@ -188,13 +188,13 @@ def auth_port(c: EcsClient, r: str, sg: str, port: int) -> None:
 def ensure_net(c: EcsClient, cfg: EcsConfig, ports: Sequence[int] = ()) -> None:
     cfg.zone_id = cfg.zone_id or pick_zone(c, cfg.region_id)
     vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr)
-    cfg.v_switch_id = cfg.v_switch_id or ensure_vsw(c, cfg.region_id, vpc, cfg.zone_id, cfg.vswitch_name, cfg.vswitch_cidr, cfg.vpc_cidr)
+    cfg.v_switch_id = cfg.v_switch_id or ensure_vswitch(c, cfg.region_id, vpc, cfg.zone_id, cfg.vswitch_name, cfg.vswitch_cidr, cfg.vpc_cidr)
     cfg.security_group_id = cfg.security_group_id or ensure_sg(c, cfg.region_id, vpc, cfg.security_group_name)
     auth_port(c, cfg.region_id, cfg.security_group_id, 22)
     for p in ports: auth_port(c, cfg.region_id, cfg.security_group_id, p)
 
 
-def pick_type(c: EcsClient, cfg: EcsConfig) -> Optional[tuple[str, str, Optional[str]]]:
+def pick_instance_type(c: EcsClient, cfg: EcsConfig) -> Optional[tuple[str, str, Optional[str]]]:
     spot = cfg.spot_strategy if cfg.use_spot else None
     req = ecs_models.DescribeAvailableResourceRequest(region_id=cfg.region_id, destination_resource="InstanceType", resource_type="instance", instance_charge_type="PostPaid", spot_strategy=spot, cores=cfg.min_cpu_cores, memory=cfg.min_memory_gb)
     resp = c.describe_available_resource(req)
@@ -213,7 +213,7 @@ def pick_type(c: EcsClient, cfg: EcsConfig) -> Optional[tuple[str, str, Optional
     return None
 
 
-def _disk_cat(c: EcsClient, r: str, zone: str) -> Optional[str]:
+def _disk_category(c: EcsClient, r: str, zone: str) -> Optional[str]:
     resp = c.describe_zones(ecs_models.DescribeZonesRequest(region_id=r))
     for z in resp.body.zones.zone or []:
         if z.zone_id != zone: continue
@@ -226,9 +226,9 @@ def _disk_cat(c: EcsClient, r: str, zone: str) -> Optional[str]:
     return None
 
 
-def create_inst(c: EcsClient, cfg: EcsConfig, disk_size: int = 40) -> str:
+def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40) -> str:
     if not cfg.instance_type: raise ValueError("instance_type required")
-    dcat = _disk_cat(c, cfg.region_id, cfg.zone_id)
+    dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
     disk = ecs_models.CreateInstanceRequestSystemDisk(category=dcat, size=disk_size) if dcat else None
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
     img = cfg.image_id or cfg.base_image_id
@@ -329,29 +329,29 @@ def create_server_image(cfg: EcsConfig, dry_run: bool = False, prepare_fn: Calla
         if not dry_run: wait_img(c, cfg.region_id, existing, cfg.poll_interval, cfg.wait_timeout)
         return f"dry-run:{existing}" if dry_run else existing
     if dry_run: return f"dry-run:{name}"
-    sel = pick_type(c, cfg)
-    if not sel and cfg.use_spot: cfg.use_spot = False; sel = pick_type(c, cfg)
+    sel = pick_instance_type(c, cfg)
+    if not sel and cfg.use_spot: cfg.use_spot = False; sel = pick_instance_type(c, cfg)
     if not sel: raise RuntimeError("no instance type")
     cfg.zone_id, cfg.instance_type, cfg.cpu_vendor = sel
     ensure_net(c, cfg)
     ensure_keypair(c, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     iid = ""
     try:
-        iid = create_inst(c, cfg)
+        iid = create_instance(c, cfg)
         logger.info(f"builder: {iid}")
         st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-        if st == "Stopped": start_inst(c, iid)
+        if st == "Stopped": start_instance(c, iid)
         wait_status(c, cfg.region_id, iid, ["Running"], cfg.poll_interval, cfg.wait_timeout)
-        alloc_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+        allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
         ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
         logger.info(f"builder ready: {ip}")
         asyncio.run(prepare_fn(ip, cfg))
         logger.info("stopping builder")
-        stop_inst(c, iid, "StopCharging")
+        stop_instance(c, iid, "StopCharging")
         wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
         cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
         if not cr.body or not cr.body.image_id:
-            stop_inst(c, iid, None); wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
+            stop_instance(c, iid, None); wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
             cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
         img = cr.body.image_id
         logger.info(f"image started: {img}")
@@ -359,7 +359,7 @@ def create_server_image(cfg: EcsConfig, dry_run: bool = False, prepare_fn: Calla
         return img
     finally:
         if cfg.cleanup_builder_instance and iid:
-            try: delete_inst(c, cfg.region_id, iid); logger.info(f"builder deleted: {iid}")
+            try: delete_instance(c, cfg.region_id, iid); logger.info(f"builder deleted: {iid}")
             except Exception as e: logger.warning(f"delete failed: {e}")
 
 
@@ -371,7 +371,7 @@ DEFAULT_DOCKER_CTX = Path(__file__).resolve().parents[1] / "node_docker_image"
 DEFAULT_SVC = "conflux-docker"
 
 
-def _pos_src() -> Path: return Path(__file__).resolve().parents[1] / "ref" / "zero-gravity-swap" / "pos_config"
+def _pos_config_source() -> Path: return Path(__file__).resolve().parents[1] / "ref" / "zero-gravity-swap" / "pos_config"
 
 
 def make_docker_prepare(node: SingleNodeConfig, ctx: Path, tag: str, repo: str, branch: str, svc: str):
@@ -392,7 +392,7 @@ def make_docker_prepare(node: SingleNodeConfig, ctx: Path, tag: str, repo: str, 
             cfgtxt = single_node_config_text(node)
             local = Path(f"/tmp/cfx_{int(time.time())}.toml"); local.write_text(cfgtxt)
             await asyncssh.scp(str(local), (conn, "/opt/conflux/config/conflux_0.toml")); local.unlink(missing_ok=True)
-            pos = _pos_src()
+            pos = _pos_config_source()
             if not pos.exists(): raise FileNotFoundError(f"pos_config not found: {pos}")
             pa = Path(f"/tmp/pos_{int(time.time())}.tar.gz")
             with tarfile.open(pa, "w:gz") as t: t.add(pos, arcname="pos_config")
@@ -425,22 +425,22 @@ class InstanceHandle:
 
 def provision_instance(cfg: EcsConfig) -> InstanceHandle:
     c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
-    sel = pick_type(c, cfg)
+    sel = pick_instance_type(c, cfg)
     if not sel: raise RuntimeError("no instance type")
     cfg.zone_id, cfg.instance_type, cfg.cpu_vendor = sel
     ensure_net(c, cfg)
-    iid = create_inst(c, cfg, disk_size=100)
+    iid = create_instance(c, cfg, disk_size=100)
     logger.info(f"instance: {iid}")
     st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-    if st == "Stopped": start_inst(c, iid)
-    alloc_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    if st == "Stopped": start_instance(c, iid)
+    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
     ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
     logger.info(f"instance ready: {ip}")
     return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
 
 
 def cleanup_instance(h: InstanceHandle) -> None:
-    delete_inst(h.client, h.config.region_id, h.instance_id)
+    delete_instance(h.client, h.config.region_id, h.instance_id)
     logger.info(f"deleted: {h.instance_id}")
 
 
@@ -455,7 +455,10 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--image-prefix", default="conflux"); p.add_argument("--ssh-username", default="root")
     p.add_argument("--ssh-private-key", default=DEFAULT_SSH_KEY); p.add_argument("--internet-max-bandwidth-out", type=int, default=10)
     p.add_argument("--poll-interval", type=int, default=5); p.add_argument("--wait-timeout", type=int, default=1800)
-    p.add_argument("--search-all-regions", action="store_true"); p.add_argument("--spot", action="store_true")
+    p.add_argument("--search-all-regions", action="store_true")
+    p.add_argument("--spot", dest="spot", action="store_true")
+    p.add_argument("--no-spot", dest="spot", action="store_false")
+    p.set_defaults(spot=True)
     p.add_argument("--spot-strategy", default="SpotAsPriceGo"); p.add_argument("--vpc-name", default="conflux-image-builder")
     p.add_argument("--vswitch-name", default="conflux-image-builder"); p.add_argument("--security-group-name", default="conflux-image-builder")
     p.add_argument("--vpc-cidr", default="10.0.0.0/16"); p.add_argument("--vswitch-cidr", default="10.0.0.0/24")
