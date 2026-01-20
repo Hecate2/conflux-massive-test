@@ -11,7 +11,7 @@ from loguru import logger
 
 from ali_instances.cleanup_resources import cleanup_all_regions
 from ali_instances.config import AliCredentials, EcsConfig, client
-from ali_instances.image_build import DEFAULT_IMAGE_NAME, find_img
+from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_image_in_region
 from ali_instances.instance_prep import (
     ensure_keypair,
     find_zone_for_instance_type,
@@ -214,15 +214,22 @@ def provision_aliyun_hosts(
             ensure_keypair(region_client, region_name, cfg.key_pair_name, cfg.ssh_private_key_path)
 
             image_id = region_cfg.get("image") or account_cfg.get("image")
-            if not image_id:
-                existing = find_img(region_client, region_name, DEFAULT_IMAGE_NAME)
-                if not existing and region_name == "ap-southeast-3":
-                    existing = "m-8psi1b0lgs5qmakt4abt"
-                if not existing:
-                    raise RuntimeError(f"image {DEFAULT_IMAGE_NAME} not found in {region_name}")
-                cfg.image_id = existing
-            else:
+            if image_id:
                 cfg.image_id = image_id
+            else:
+                base_image_name = (
+                    region_cfg.get("base_image_name")
+                    or account_cfg.get("base_image_name")
+                    or DEFAULT_IMAGE_NAME
+                )
+                cfg.image_id = ensure_image_in_region(
+                    creds=creds,
+                    region=region_name,
+                    image_name=base_image_name,
+                    search_regions=[r.get("name") for r in regions],
+                    poll_interval=cfg.poll_interval,
+                    wait_timeout=cfg.wait_timeout,
+                )
 
             def _no_stock(exc: Exception) -> bool:
                 return "OperationDenied.NoStock" in str(exc)

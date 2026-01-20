@@ -4,10 +4,15 @@
          "access_key_id":"",
          "access_key_secret":"",
          "user_tag":"chenxinghao",
+         "base_image_name":"conflux-docker-base",
          "regions":[
             {
                "name":"ap-southeast-3",
-               "count":3
+               "count":2
+            },
+            {
+               "name":"ap-southeast-6",
+               "count":1
             }
          ],
          "type":[

@@ -1,7 +1,7 @@
 """Server image building utilities for Aliyun ECS."""
 import asyncio
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional, Sequence, Tuple
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
@@ -9,7 +9,7 @@ from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
-from .config import EcsConfig, client
+from .config import AliCredentials, EcsConfig, client
 from .instance_prep import (
     allocate_public_ip,
     create_instance,
@@ -38,6 +38,61 @@ def find_img(c: EcsClient, r: str, name: str) -> Optional[str]:
         if i.image_name == name:
             return i.image_id
     return None
+
+
+def find_img_in_regions(
+    creds: AliCredentials,
+    regions: Sequence[str],
+    name: str,
+) -> Optional[Tuple[str, str]]:
+    for region in regions:
+        c = client(creds, region, None)
+        img = find_img(c, region, name)
+        if img:
+            return region, img
+    return None
+
+
+def ensure_image_in_region(
+    *,
+    creds: AliCredentials,
+    region: str,
+    image_name: str,
+    search_regions: Sequence[str],
+    poll_interval: int,
+    wait_timeout: int,
+) -> str:
+    c = client(creds, region, None)
+    existing = find_img(c, region, image_name)
+    if existing:
+        return existing
+
+    lookup_regions = [r for r in search_regions if r]
+    if region not in lookup_regions:
+        lookup_regions.append(region)
+
+    found = find_img_in_regions(creds, lookup_regions, image_name)
+    if not found:
+        raise RuntimeError(f"image {image_name} not found in any region")
+    src_region, src_image_id = found
+    if src_region == region:
+        return src_image_id
+
+    logger.info(f"copying image {image_name} from {src_region} to {region}")
+    src_client = client(creds, src_region, None)
+    resp = src_client.copy_image(
+        ecs_models.CopyImageRequest(
+            region_id=src_region,
+            destination_region_id=region,
+            image_id=src_image_id,
+            destination_image_name=image_name,
+        )
+    )
+    image_id = resp.body.image_id if resp.body else None
+    if not image_id:
+        raise RuntimeError(f"failed to copy image {image_name} to {region}")
+    wait_img(c, region, image_id, poll_interval, wait_timeout)
+    return image_id
 
 
 def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -> str:
@@ -183,7 +238,7 @@ def create_server_image(
     ensure_keypair(c, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     iid = ""
     try:
-        iid = create_instance(c, cfg, amount=1)[0]
+        iid = create_instance(c, cfg, disk_size=20)[0]
         logger.info(f"builder: {iid}")
         st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
         if st == "Stopped":
