@@ -13,6 +13,10 @@ DEFAULT_SSH_KEY = "./keys/chenxinghao-conflux-image-builder.pem"
 DEFAULT_VPC = "conflux-image-builder"
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
 DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
+DEFAULT_COMMON_TAG_KEY = "conflux-massive-test"
+DEFAULT_COMMON_TAG_VALUE = "true"
+DEFAULT_USER_TAG_KEY = "user"
+DEFAULT_USER_TAG_VALUE = "chenxinghao"
 
 
 @dataclass
@@ -54,6 +58,10 @@ class EcsConfig:
     cleanup_builder_instance: bool = True
     poll_interval: int = 5
     wait_timeout: int = 1800
+    common_tag_key: str = DEFAULT_COMMON_TAG_KEY
+    common_tag_value: str = DEFAULT_COMMON_TAG_VALUE
+    user_tag_key: str = DEFAULT_USER_TAG_KEY
+    user_tag_value: str = DEFAULT_USER_TAG_VALUE
 
 
 def load_credentials() -> AliCredentials:

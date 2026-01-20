@@ -21,6 +21,8 @@ class RemoteNode:
     host: str
     index: int
     key: str = None
+    ssh_user: str = "ubuntu"
+    ssh_key_path: str | None = None
 
     def __hash__(self):
         # 返回基于不可变属性的哈希值

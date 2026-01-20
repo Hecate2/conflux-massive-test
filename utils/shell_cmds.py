@@ -1,47 +1,90 @@
-import subprocess
+import asyncio
 import time
+from pathlib import Path
 from typing import List
+
+import asyncssh
 
 from loguru import logger
 
-def scp(script_path: str, ip_address: str, user: str = "ubuntu", remote_path: str = "~"):
-    scp_cmd = [
-        'scp',
-        '-o', 'StrictHostKeyChecking=no',
-        "-o", "UserKnownHostsFile=/dev/null",
-        script_path,
-        f'{user}@{ip_address}:{remote_path}'
-    ]
-    subprocess.run(scp_cmd, check=True, capture_output=True)
 
-def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: str = "ubuntu", compress_level: int = 12, max_retries: int = 3):
-    rsync_cmd = [
-        'rsync',
-        '-az',  # -a: archive mode, -v: verbose, -z: compress
-        # '--whole-file',  # 跳过差异对比，直接传输整个文件
-        '--compress-choice=zstd',  # 使用 zstd 压缩
-        f'--compress-level={compress_level}',  # 压缩级别 12
-        '-e', 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null',  # SSH 选项
-        f'{user}@{ip_address}:{remote_path}',
-        local_path,
-    ]
-    # Python 层面实现重试
-    for attempt in range(max_retries):
+def _run_async(coro):
+    return asyncio.run(coro)
+
+
+async def _wait_ssh_ready(ip_address: str, user: str, key_path: str | None, timeout: int, interval: int):
+    if not key_path:
+        return
+    from ali_instances.instance_prep import wait_ssh
+
+    await wait_ssh(ip_address, user, key_path, timeout, interval)
+
+
+def _connect_kwargs(user: str, key_path: str | None) -> dict:
+    kwargs = {"username": user, "known_hosts": None}
+    if key_path:
+        kwargs["client_keys"] = [key_path]
+    return kwargs
+
+
+async def _retry_async(action, *, timeout: int, retry_delay: int):
+    deadline = time.time() + timeout
+    attempt = 0
+    while True:
         try:
-            subprocess.run(rsync_cmd, check=True, capture_output=True)
-            return  # 成功则返回
-        except subprocess.CalledProcessError as e:
-            if attempt == max_retries - 1:  # 最后一次尝试
-                logger.warning(f"Cannot download files from {user}@{ip_address}:{remote_path} to {local_path}: {e}")
-                raise Exception("Cannot download")
-            # print(f"Attempt {attempt + 1} failed, retrying...")
-        except subprocess.TimeoutExpired as e:
-            if attempt == max_retries - 1:
-                logger.warning(f"Cannot download files from {user}@{ip_address}:{remote_path} to {local_path}: {e}")
-                raise Exception("Cannot download")
-            # print(f"Timeout on attempt {attempt + 1}, retrying...")
+            return await action()
+        except Exception as exc:
+            attempt += 1
+            if time.time() + retry_delay >= deadline:
+                raise
+            logger.debug(f"SSH retry {attempt}, retry in {retry_delay}s: {exc}")
+            await asyncio.sleep(retry_delay)
 
-def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None = None, *, max_retries: int = 3, retry_delay: int = 15):
+def scp(
+    script_path: str,
+    ip_address: str,
+    user: str = "ubuntu",
+    remote_path: str = "~",
+    *,
+    key_path: str | None = None,
+    retry_delay: int = 10,
+    timeout: int = 60,
+):
+    async def _do():
+        await _wait_ssh_ready(ip_address, user, key_path, timeout, 3)
+        async with asyncssh.connect(ip_address, **_connect_kwargs(user, key_path)) as conn:
+            await asyncssh.scp(script_path, (conn, remote_path))
+
+    _run_async(_retry_async(_do, timeout=timeout, retry_delay=retry_delay))
+
+def rsync_download(
+    remote_path: str,
+    local_path: str,
+    ip_address: str,
+    *,
+    user: str = "ubuntu",
+    key_path: str | None = None,
+    compress_level: int = 12,
+    retry_delay: int = 10,
+    timeout: int = 120,
+):
+    async def _do():
+        await _wait_ssh_ready(ip_address, user, key_path, timeout, 3)
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        async with asyncssh.connect(ip_address, **_connect_kwargs(user, key_path)) as conn:
+            await asyncssh.scp((conn, remote_path), local_path, recurse=True)
+
+    _run_async(_retry_async(_do, timeout=timeout, retry_delay=retry_delay))
+
+def ssh(
+    ip_address: str,
+    user: str = "ubuntu",
+    command: str | List[str] | None = None,
+    *,
+    key_path: str | None = None,
+    retry_delay: int = 15,
+    timeout: int = 60,
+):
     if command is None:
         return
     
@@ -49,21 +92,22 @@ def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None =
         command = [command]
 
     ssh_cmd = [
-        'ssh',
-        '-o', 'StrictHostKeyChecking=no',
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
-        f'{user}@{ip_address}',
-        *command
     ]
+    if key_path:
+        ssh_cmd.extend(["-i", key_path])
+    ssh_cmd.extend(
+        [
+            f"{user}@{ip_address}",
+            *command,
+        ]
+    )
 
-    for attempt in range(max_retries):
-        try:
-            result = subprocess.run(ssh_cmd, check=True, capture_output=True, text=True)
-            return result
-        except subprocess.CalledProcessError as e:
-            if attempt < max_retries - 1:
-                logger.debug(f"{ip_address} SSH 失败 (尝试 {attempt + 1}/{max_retries}), {retry_delay} 秒后重试...  {e}")
-                time.sleep(retry_delay)
-            else:
-                logger.debug(f"{ip_address} SSH 失败，已达到最大重试次数")
-                raise
+    async def _do():
+        await _wait_ssh_ready(ip_address, user, key_path, timeout, 3)
+        async with asyncssh.connect(ip_address, **_connect_kwargs(user, key_path)) as conn:
+            return await conn.run(" ".join(command), check=True)
+
+    return _run_async(_retry_async(_do, timeout=timeout, retry_delay=retry_delay))

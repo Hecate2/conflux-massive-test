@@ -1,21 +1,40 @@
 """Instance preparation and lifecycle helpers for Aliyun ECS."""
-import asyncio
 import ipaddress
 import json
-import socket
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
 from .config import EcsConfig, client
+
+# Re-export for backward compatibility
+from remote_simulation.ssh_utils import wait_ssh
+
+
+def _tag_dict(cfg: EcsConfig) -> dict[str, str]:
+    return {
+        cfg.common_tag_key: cfg.common_tag_value,
+        cfg.user_tag_key: cfg.user_tag_value,
+    }
+
+
+def _tag_resource(c: EcsClient, r: str, resource_type: str, resource_id: str, tags: dict[str, str]) -> None:
+    tag_list = [ecs_models.TagResourcesRequestTag(key=k, value=v) for k, v in tags.items()]
+    c.tag_resources(
+        ecs_models.TagResourcesRequest(
+            region_id=r,
+            resource_type=resource_type,
+            resource_id=[resource_id],
+            tag=tag_list,
+        )
+    )
 
 
 def _instance_info(c: EcsClient, r: str, iid: str) -> tuple[Optional[str], Optional[str]]:
@@ -155,9 +174,36 @@ def ensure_net(c: EcsClient, cfg: EcsConfig, ports: Sequence[int] = ()) -> None:
         c, cfg.region_id, vpc, cfg.zone_id, cfg.vswitch_name, cfg.vswitch_cidr, cfg.vpc_cidr
     )
     cfg.security_group_id = cfg.security_group_id or ensure_sg(c, cfg.region_id, vpc, cfg.security_group_name)
+    tags = _tag_dict(cfg)
+    try:
+        if cfg.security_group_id:
+            _tag_resource(c, cfg.region_id, "securitygroup", cfg.security_group_id, tags)
+    except Exception as exc:
+        logger.warning(f"failed to tag security group {cfg.security_group_id}: {exc}")
     auth_port(c, cfg.region_id, cfg.security_group_id, 22)
     for p in ports:
         auth_port(c, cfg.region_id, cfg.security_group_id, p)
+
+
+def list_zones_for_instance_type(
+    c: EcsClient, r: str, instance_type: str, preferred_zones: Optional[Sequence[str]] = None
+) -> list[str]:
+    resp = c.describe_zones(ecs_models.DescribeZonesRequest(region_id=r))
+    zones: list[str] = []
+    for z in resp.body.zones.zone or []:
+        if not z.zone_id:
+            continue
+        if preferred_zones and z.zone_id not in preferred_zones:
+            continue
+        zones.append(z.zone_id)
+    return zones
+
+
+def find_zone_for_instance_type(
+    c: EcsClient, r: str, instance_type: str, preferred_zones: Optional[Sequence[str]] = None
+) -> Optional[str]:
+    zones = list_zones_for_instance_type(c, r, instance_type, preferred_zones)
+    return zones[0] if zones else None
 
 
 def pick_instance_type(c: EcsClient, cfg: EcsConfig) -> Optional[tuple[str, str, Optional[str]]]:
@@ -221,14 +267,24 @@ def _disk_category(c: EcsClient, r: str, zone: str) -> Optional[str]:
     return None
 
 
-def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40) -> str:
+def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: int = 1) -> list[str]:
     if not cfg.instance_type:
         raise ValueError("instance_type required")
-    dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
-    disk = ecs_models.CreateInstanceRequestSystemDisk(category=dcat, size=disk_size) if dcat else None
-    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
+    if not cfg.zone_id:
+        raise ValueError("zone_id required")
     img = cfg.image_id or cfg.base_image_id
-    req = ecs_models.CreateInstanceRequest(
+    if not img:
+        raise ValueError("image_id required")
+    if not cfg.security_group_id:
+        raise ValueError("security_group_id required")
+    if not cfg.v_switch_id:
+        raise ValueError("v_switch_id required")
+
+    dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
+    disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
+    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
+    tags = [ecs_models.RunInstancesRequestTag(key=k, value=v) for k, v in _tag_dict(cfg).items()]
+    req = ecs_models.RunInstancesRequest(
         region_id=cfg.region_id,
         zone_id=cfg.zone_id,
         image_id=img,
@@ -240,13 +296,18 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40) -> str:
         internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
         internet_charge_type="PayByTraffic",
         instance_charge_type="PostPaid",
-        spot_strategy=cfg.spot_strategy if cfg.use_spot else None,
-        system_disk=disk,
+        tag=tags,
+        amount=amount,
     )
-    resp = c.create_instance(req)
-    if not resp.body or not resp.body.instance_id:
+    if cfg.use_spot:
+        req.spot_strategy = cfg.spot_strategy
+    if disk:
+        req.system_disk = disk
+    resp = c.run_instances(req)
+    ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
+    if not ids:
         raise RuntimeError("instance creation failed")
-    return resp.body.instance_id
+    return ids
 
 
 def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str) -> None:
@@ -265,32 +326,6 @@ def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str) -> None:
     c.import_key_pair(ecs_models.ImportKeyPairRequest(region_id=r, key_pair_name=name, public_key_body=res.stdout.strip()))
 
 
-async def _wait_tcp(host: str, port: int, timeout: int, interval: int = 3) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
-            if s.connect_ex((host, port)) == 0:
-                return
-        await asyncio.sleep(interval)
-    raise TimeoutError(f"port {port} not open on {host}")
-
-
-async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int = 3) -> None:
-    await _wait_tcp(host, 22, timeout, interval)
-    kp = str(Path(key).expanduser())
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            conn = await asyncssh.connect(host, username=user, client_keys=[kp], known_hosts=None)
-            conn.close()
-            await conn.wait_closed()
-            return
-        except Exception:
-            await asyncio.sleep(interval)
-    raise TimeoutError(f"SSH not ready for {host}")
-
-
 # --- Instance ---
 @dataclass
 class InstanceHandle:
@@ -307,7 +342,23 @@ def provision_instance(cfg: EcsConfig) -> InstanceHandle:
         raise RuntimeError("no instance type")
     cfg.zone_id, cfg.instance_type, cfg.cpu_vendor = sel
     ensure_net(c, cfg)
-    iid = create_instance(c, cfg, disk_size=100)
+    iid = create_instance(c, cfg, disk_size=100, amount=1)[0]
+    logger.info(f"instance: {iid}")
+    st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
+    if st == "Stopped":
+        start_instance(c, iid)
+    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    logger.info(f"instance ready: {ip}")
+    return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
+
+
+def provision_instance_with_type(cfg: EcsConfig, instance_type: str, zone_id: Optional[str], ports: Sequence[int]) -> InstanceHandle:
+    c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
+    cfg.instance_type = instance_type
+    cfg.zone_id = zone_id or cfg.zone_id
+    ensure_net(c, cfg, ports)
+    iid = create_instance(c, cfg, disk_size=100, amount=1)[0]
     logger.info(f"instance: {iid}")
     st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
     if st == "Stopped":

@@ -340,7 +340,14 @@ class StatisticsReporter(threading.Thread):
         self.should_stop.set()
 
 # 主函数
-def generate_blocks_async(nodes: List[RemoteNode], num_blocks: int, max_block_size_in_bytes: int, generation_period_ms:int, min_node_interval_ms: int=100):
+def generate_blocks_async(
+    nodes: List[RemoteNode],
+    num_blocks: int,
+    max_block_size_in_bytes: int,
+    generation_period_ms: int,
+    min_node_interval_ms: int = 100,
+    max_failures: int = 0,
+):
     """重构后的异步区块生成函数"""
     
     # 1. 生成出块计划
@@ -363,5 +370,9 @@ def generate_blocks_async(nodes: List[RemoteNode], num_blocks: int, max_block_si
     )
     
     # 3. 执行计划
-    scheduler = BlockGenerationScheduler(nodes=nodes, max_block_size_in_bytes=max_block_size_in_bytes)
+    scheduler = BlockGenerationScheduler(
+        nodes=nodes,
+        max_block_size_in_bytes=max_block_size_in_bytes,
+        max_failures=max_failures,
+    )
     scheduler.execute(tasks)

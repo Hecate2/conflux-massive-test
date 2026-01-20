@@ -50,8 +50,7 @@ def stop_node_and_collect_log(index: int) -> str:
         f"-v ~/output{index}:/root/output",
         "-w /root",                       
         IMAGE_TAG, 
-        "/bin/bash -c ./collect_logs.sh &&",
-        f"sudo chown ubuntu:ubuntu ~/output{index}/*"
+        "/bin/bash -c ./collect_logs.sh"
     )
 
     return " ".join(stop_node) + " && " + " ".join(collect_logs)

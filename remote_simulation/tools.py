@@ -1,3 +1,4 @@
+import asyncio
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
@@ -5,14 +6,14 @@ from typing import List, Tuple
 from loguru import logger
 
 from remote_simulation import docker_cmds
-from utils import shell_cmds
+from remote_simulation.ssh_utils import run_ssh, scp_download
 from utils.counter import AtomicCounter
 from utils.wait_until import wait_until
 
 from .remote_node import RemoteNode
 
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 
 def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
@@ -39,7 +40,8 @@ def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
     if len(rare_blocks_info) > 0:
         logger.debug("出现次数不超过5的区块及其节点:")
         for (block_hash, cnt, node_ids) in rare_blocks_info:
-            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join(node_ids)}")
+            node_list = ",".join(node_ids)
+            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {node_list}")
     
     most_common = Counter(best_blocks).most_common(1)
     if not most_common:
@@ -76,13 +78,40 @@ def init_tx_gen(nodes: List[RemoteNode], txgen_account_count:int, max_workers: i
     else:
         logger.success(f"全部节点设置交易生成成功")
 
-def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, counter2: AtomicCounter, total_cnt: str, local_path: str = "./logs"):
+async def _stop_node_and_collect_log(
+    node: RemoteNode,
+    *,
+    counter1: AtomicCounter,
+    counter2: AtomicCounter,
+    total_cnt: int,
+    local_path: str = "./logs",
+):
     try:
-        shell_cmds.ssh(node.host, "ubuntu", docker_cmds.stop_node_and_collect_log(node.index))
+        await run_ssh(
+            node.host,
+            node.ssh_user,
+            docker_cmds.stop_node_and_collect_log(node.index),
+            key_path=node.ssh_key_path,
+        )
         cnt1 = counter1.increment()
         logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
 
-        shell_cmds.rsync_download(f"./output{node.index}/", f"./{local_path}/{node.id}/", node.host)
+        if node.ssh_user:
+            await run_ssh(
+                node.host,
+                node.ssh_user,
+                f"sudo chown -R {node.ssh_user}:{node.ssh_user} ~/output{node.index} || true",
+                key_path=node.ssh_key_path,
+                check=False,
+            )
+
+        await scp_download(
+            f"~/output{node.index}/",
+            f"./{local_path}/{node.id}/",
+            node.host,
+            user=node.ssh_user,
+            key_path=node.ssh_key_path,
+        )
         cnt2 = counter2.increment()
         logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
 
@@ -95,7 +124,32 @@ def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_wor
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
     total_cnt = len(nodes)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = executor.map(lambda node: _stop_node_and_collect_log(node, local_path=local_path, counter1=counter1, counter2=counter2, total_cnt=total_cnt), nodes)
-    
-    fail_cnt = sum(results)
+
+    async def _run():
+        sem = asyncio.Semaphore(max_workers)
+
+        async def _wrap(node: RemoteNode):
+            async with sem:
+                return await _stop_node_and_collect_log(
+                    node,
+                    local_path=local_path,
+                    counter1=counter1,
+                    counter2=counter2,
+                    total_cnt=total_cnt,
+                )
+
+        tasks = [_wrap(node) for node in nodes]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    results = asyncio.run(_run())
+    fail_cnt = 0
+    for res in results:
+        if isinstance(res, Exception):
+            fail_cnt += 1
+        else:
+            fail_cnt += int(res)
+
+    if fail_cnt > 0:
+        logger.warning(f"日志收集失败节点数: {fail_cnt}")
+    else:
+        logger.success("全部节点日志收集成功")

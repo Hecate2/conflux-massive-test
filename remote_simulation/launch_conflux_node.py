@@ -1,26 +1,19 @@
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from dataclasses import dataclass
-from . import docker_cmds
-from .remote_node import RemoteNode
-from utils import shell_cmds
-from remote_simulation.port_allocation import remote_rpc_port
-from utils.counter import AtomicCounter
-from utils.tempfile import TempFile
 from itertools import chain
-
-
-
-
-from typing import List
+from typing import Iterable, List, Sequence
 
 import time
 import requests
 
 from loguru import logger
 
-
-HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=400)
-NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=400)
+from . import docker_cmds
+from .remote_node import RemoteNode
+from remote_simulation.port_allocation import remote_rpc_port
+from remote_simulation.ssh_utils import run_ssh, scp_upload
+from utils.counter import AtomicCounter
+from utils.tempfile import TempFile
 
 @dataclass
 class InstanceExecutionContext:
@@ -28,92 +21,147 @@ class InstanceExecutionContext:
     config_file: TempFile
     pull_docker_image: bool
     nodes_per_host: int
+    ssh_user: str
 
 
-def launch_remote_nodes(ips: List[str], nodes_per_host: int, config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:
+@dataclass
+class HostSpec:
+    ip: str
+    nodes_per_host: int
+    ssh_user: str = "ubuntu"
+    ssh_key_path: str | None = None
+    provider: str | None = None
+
+
+def launch_remote_nodes(hosts: Sequence[HostSpec], config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:
     logger.info("开始启动所有 Conflux 节点")
 
     counter = AtomicCounter()
-    context = InstanceExecutionContext(counter=counter, config_file=config_file, pull_docker_image=pull_docker_image, nodes_per_host=nodes_per_host)
 
-    launch_instance_future = HOST_CONNECT_POOL.map(lambda ip: _execute_instance(ip, "ubuntu", context), ips)
+    async def _run():
+        tasks = [_execute_instance(host, counter, config_file, pull_docker_image) for host in hosts]
+        results = await asyncio.gather(*tasks)
+        return list(chain.from_iterable(results))
 
-    expected_nodes_cnt = len(ips) * nodes_per_host
-
-    nodes = list(chain.from_iterable(launch_instance_future))
-
+    nodes = asyncio.run(_run())
+    expected_nodes_cnt = sum(h.nodes_per_host for h in hosts)
     nodes_cnt = len(nodes)
-
     logger.info(f"节点初始化完成，成功数量 {nodes_cnt} 失败数量 {expected_nodes_cnt - nodes_cnt}")
-
     return nodes
 
 
-def stop_remote_nodes(ips: List[str]):
-    def _stop_instance(ip_address: str, user: str):
+def stop_remote_nodes(hosts: Iterable[HostSpec]):
+    async def _stop_instance(host: HostSpec):
         try:
-            shell_cmds.ssh(ip_address, user, docker_cmds.stop_all_nodes())
-            logger.debug(f"实例 {ip_address} 已停止所有节点")
+            await run_ssh(
+                host.ip,
+                host.ssh_user,
+                docker_cmds.stop_all_nodes(),
+                key_path=host.ssh_key_path,
+            )
+            logger.debug(f"实例 {host.ip} 已停止所有节点")
             return 0
         except Exception as e:
-            logger.warning(f"停止实例 {ip_address} 上节点遇到问题: {e}")
+            logger.warning(f"停止实例 {host.ip} 上节点遇到问题: {e}")
             return 1
 
-    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda ip: _stop_instance(ip, "ubuntu"), ips))
+    async def _run():
+        tasks = [_stop_instance(host) for host in hosts]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    results = asyncio.run(_run())
+    fail_cnt = sum(1 for res in results if isinstance(res, Exception) or res == 1)
 
 
-def destory_remote_nodes(ips: List[str]):
-    def _stop_instance(ip_address: str, user: str):
+def destory_remote_nodes(hosts: Iterable[HostSpec]):
+    async def _stop_instance(host: HostSpec):
         try:
-            shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
-            logger.debug(f"实例 {ip_address} 已销毁所有节点")
+            await run_ssh(
+                host.ip,
+                host.ssh_user,
+                docker_cmds.destory_all_nodes(),
+                key_path=host.ssh_key_path,
+            )
+            logger.debug(f"实例 {host.ip} 已销毁所有节点")
             return 0
         except Exception as e:
-            logger.warning(f"停止实例 {ip_address} 上节点遇到问题: {e}")
+            logger.warning(f"停止实例 {host.ip} 上节点遇到问题: {e}")
             return 1
 
-    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda ip: _stop_instance(ip, "ubuntu"), ips))
+    async def _run():
+        tasks = [_stop_instance(host) for host in hosts]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    results = asyncio.run(_run())
+    fail_cnt = sum(1 for res in results if isinstance(res, Exception) or res == 1)
 
     
 
 
-def _execute_instance(ip_address: str, user: str, ctx: InstanceExecutionContext) -> List[RemoteNode]:
+async def _execute_instance(host: HostSpec, counter: AtomicCounter, config_file: TempFile, pull_docker_image: bool) -> List[RemoteNode]:
     # 返回失败节点数量
     try:
-        shell_cmds.scp(ctx.config_file.path, ip_address, user, "~/config.toml")
-        logger.debug(f"实例 {ip_address} 同步配置完成")
-        if ctx.pull_docker_image:
-            shell_cmds.ssh(ip_address, user, docker_cmds.pull_image())
-            logger.debug(f"实例 {ip_address} 拉取 docker 镜像完成")
+        await scp_upload(
+            config_file.path,
+            host.ip,
+            host.ssh_user,
+            "~/config.toml",
+            key_path=host.ssh_key_path,
+        )
+        logger.debug(f"实例 {host.ip} 同步配置完成")
+        if pull_docker_image:
+            await run_ssh(
+                host.ip,
+                host.ssh_user,
+                docker_cmds.pull_image(),
+                key_path=host.ssh_key_path,
+            )
+            logger.debug(f"实例 {host.ip} 拉取 docker 镜像完成")
 
         # 清理之前实验的残留数据        
-        shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
-        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点")
+        await run_ssh(
+            host.ip,
+            host.ssh_user,
+            docker_cmds.destory_all_nodes(),
+            key_path=host.ssh_key_path,
+        )
+        logger.debug(f"实例 {host.ip} 状态初始化完成，开始启动节点")
     except Exception as e:
-        logger.warning(f"无法初始化实例 {ip_address}: {e}")
+        logger.warning(f"无法初始化实例 {host.ip}: {e}")
         return list()
     
-    launch_nodes_future = NODE_CONNECT_POOL.map(lambda index: _launch_node(ip_address, user, index, ctx.counter), range(ctx.nodes_per_host))
-    return [n for n in launch_nodes_future if n is not None]
+    tasks = [
+        _launch_node(host.ip, host.ssh_user, index, counter, host.ssh_key_path, host.provider)
+        for index in range(host.nodes_per_host)
+    ]
+    results = await asyncio.gather(*tasks)
+    return [n for n in results if n is not None]
 
 
 
-def _launch_node(ip_address: str, user: str, index: int, counter: AtomicCounter):
+async def _launch_node(ip_address: str, user: str, index: int, counter: AtomicCounter, key_path: str | None, provider: str | None):
     try:
-        shell_cmds.ssh(ip_address, user, docker_cmds.launch_node(index))
+        await run_ssh(
+            ip_address,
+            user,
+            docker_cmds.launch_node(index),
+            key_path=key_path,
+        )
     except Exception as e:
         logger.info(f"实例 {ip_address} 节点 {index} 启动失败：{e}")
         return None
     
     # TODO: 是否需要清理未成功启动的 node?
     
-    if not test_say_hello(remote_rpc_port(index), ip_address):
+    ok = await asyncio.to_thread(test_say_hello, remote_rpc_port(index), ip_address)
+    if not ok:
         logger.info(f"实例 {ip_address} 节点 {index} 无法建立连接")
         return None
 
-    node = RemoteNode(host=ip_address, index=index)
+    node = RemoteNode(host=ip_address, index=index, ssh_user=user, ssh_key_path=key_path)
 
-    if not node.wait_for_ready():
+    ready = await asyncio.to_thread(node.wait_for_ready)
+    if not ready:
         logger.info(f"实例 {ip_address} 节点 {index} 无法进入就绪状态")
         return None
 

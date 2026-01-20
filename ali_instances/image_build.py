@@ -11,7 +11,6 @@ from loguru import logger
 from utils.wait_until import wait_until
 from .config import EcsConfig, client
 from .instance_prep import (
-    _wait_tcp,
     allocate_public_ip,
     create_instance,
     delete_instance,
@@ -108,7 +107,7 @@ def wait_img(c: EcsClient, r: str, img: str, poll: int, timeout: int) -> None:
 
 async def default_prepare(host: str, cfg: EcsConfig) -> None:
     key = str(Path(cfg.ssh_private_key_path).expanduser())
-    await _wait_tcp(host, 22, cfg.wait_timeout, 3)
+    await wait_ssh(host, cfg.ssh_username, cfg.ssh_private_key_path, cfg.wait_timeout, 3)
     async with asyncssh.connect(host, username=cfg.ssh_username, client_keys=[key], known_hosts=None) as conn:
         async def run(cmd: str) -> None:
             logger.info(f"remote: {cmd}")
@@ -184,7 +183,7 @@ def create_server_image(
     ensure_keypair(c, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     iid = ""
     try:
-        iid = create_instance(c, cfg)
+        iid = create_instance(c, cfg, amount=1)[0]
         logger.info(f"builder: {iid}")
         st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
         if st == "Stopped":
