@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import tarfile
 import time
@@ -10,13 +9,11 @@ from loguru import logger
 
 from ali_instances.ali import (
     EcsConfig,
-    add_args,
     auth_port,
     cleanup_instance,
     client,
     ensure_keypair,
     find_ubuntu,
-    load_endpoint,
     provision_instance,
     wait_ssh,
 )
@@ -25,6 +22,12 @@ from remote_simulation.config_builder import SingleNodeConfig, single_node_confi
 
 DEFAULT_DOCKER_IMAGE = "2474101468/conflux-single-node:latest"
 DEFAULT_SERVICE_NAME = "conflux-docker"
+DEFAULT_RPC_PORT = 12537
+DEFAULT_WS_PORT = 12538
+DEFAULT_EVM_RPC_PORT = 12539
+DEFAULT_EVM_WS_PORT = 12540
+DEFAULT_CHAIN_ID = 1024
+DEFAULT_EVM_CHAIN_ID = 1025
 
 
 def _pos_config_source() -> Path:
@@ -98,72 +101,21 @@ async def deploy_docker_conflux(host: str, cfg: EcsConfig, node: SingleNodeConfi
         await run("sudo docker ps --no-trunc | head -n 5", check=False)
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Conflux Docker image on Aliyun and verify it")
-    add_args(parser)
-    parser.add_argument("--rpc-port", type=int, default=12537)
-    parser.add_argument("--ws-port", type=int, default=12538)
-    parser.add_argument("--evm-rpc-port", type=int, default=12539)
-    parser.add_argument("--evm-ws-port", type=int, default=12540)
-    parser.add_argument("--chain-id", type=int, default=1024)
-    parser.add_argument("--evm-chain-id", type=int, default=1025)
-    parser.add_argument("--mining-author", default=None)
-    parser.add_argument("--docker-image", default=DEFAULT_DOCKER_IMAGE)
-    parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME)
-    return parser
-
-
-def cfg_from_args(a) -> EcsConfig:
-    return EcsConfig(
-        credentials=EcsConfig().credentials,
-        region_id=a.region_id,
-        zone_id=a.zone_id,
-        endpoint=a.endpoint or load_endpoint(),
-        base_image_id=a.base_image_id,
-        instance_type=a.instance_type,
-        min_cpu_cores=a.min_cpu_cores,
-        min_memory_gb=a.min_memory_gb,
-        max_memory_gb=a.max_memory_gb,
-        use_spot=a.spot,
-        spot_strategy=a.spot_strategy,
-        v_switch_id=a.v_switch_id,
-        security_group_id=a.security_group_id,
-        vpc_name=a.vpc_name,
-        vswitch_name=a.vswitch_name,
-        security_group_name=a.security_group_name,
-        vpc_cidr=a.vpc_cidr,
-        vswitch_cidr=a.vswitch_cidr,
-        key_pair_name=a.key_pair_name,
-        ssh_username=a.ssh_username,
-        ssh_private_key_path=a.ssh_private_key,
-        conflux_git_ref=a.conflux_git_ref,
-        image_prefix=a.image_prefix,
-        internet_max_bandwidth_out=a.internet_max_bandwidth_out,
-        search_all_regions=a.search_all_regions,
-        cleanup_builder_instance=True,
-        poll_interval=a.poll_interval,
-        wait_timeout=a.wait_timeout,
-    )
-
-
 def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
-    cfg = cfg_from_args(args)
-
+    cfg = EcsConfig()
     base_client = client(cfg.credentials, cfg.region_id, cfg.endpoint)
     ensure_keypair(base_client, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     if not cfg.base_image_id and not cfg.image_id:
         cfg.base_image_id = find_ubuntu(base_client, cfg.region_id)
 
     node = SingleNodeConfig(
-        rpc_port=args.rpc_port,
-        ws_port=args.ws_port,
-        evm_rpc_port=args.evm_rpc_port,
-        evm_ws_port=args.evm_ws_port,
-        chain_id=args.chain_id,
-        evm_chain_id=args.evm_chain_id,
-        mining_author=args.mining_author,
+        rpc_port=DEFAULT_RPC_PORT,
+        ws_port=DEFAULT_WS_PORT,
+        evm_rpc_port=DEFAULT_EVM_RPC_PORT,
+        evm_ws_port=DEFAULT_EVM_WS_PORT,
+        chain_id=DEFAULT_CHAIN_ID,
+        evm_chain_id=DEFAULT_EVM_CHAIN_ID,
+        mining_author=None,
     )
 
     instance: Optional[object] = None
@@ -174,7 +126,7 @@ def main() -> None:
         for port in [node.rpc_port, node.ws_port, node.evm_rpc_port, node.evm_ws_port]:
             auth_port(instance.client, instance.config.region_id, instance.config.security_group_id, port)
 
-        asyncio.run(deploy_docker_conflux(instance.public_ip, instance.config, node, args.docker_image, args.service_name))
+        asyncio.run(deploy_docker_conflux(instance.public_ip, instance.config, node, DEFAULT_DOCKER_IMAGE, DEFAULT_SERVICE_NAME))
         wait_for_rpc(instance.public_ip, node.rpc_port, timeout=300)
         check_transaction_processing(instance.public_ip, node.rpc_port, node.evm_rpc_port, node.chain_id, node.evm_chain_id)
         logger.info("conflux single-node verification succeeded")
