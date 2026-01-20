@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -11,10 +10,9 @@ from loguru import logger
 
 from ali_instances.cleanup_resources import cleanup_all_regions
 from ali_instances.config import AliCredentials, EcsConfig, client
-from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_image_in_region
+from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_images_in_regions
 from ali_instances.instance_prep import (
     ensure_keypair,
-    find_zone_for_instance_type,
     list_zones_for_instance_type,
     provision_instance_with_type,
 )
@@ -82,45 +80,20 @@ def preferred_zones(region_cfg: Dict) -> Optional[List[str]]:
     return [z["name"] for z in zones_cfg if "name" in z]
 
 
-def plan_region_instances(
-    *,
-    region_client,
-    region_name: str,
-    count: int,
-    type_specs: Sequence[AliTypeSpec],
-    preferred: Optional[List[str]],
-) -> List[AliInstancePlan]:
-    remaining = count
-    plans: List[AliInstancePlan] = []
-    last_available: Optional[AliInstancePlan] = None
+def zone_subnet_map(region_cfg: Dict) -> Dict[str, str]:
+    zones_cfg = region_cfg.get("zones") or []
+    mapping: Dict[str, str] = {}
+    for z in zones_cfg:
+        name = z.get("name")
+        subnet = z.get("subnet")
+        if name and subnet:
+            mapping[name] = subnet
+    return mapping
 
-    for spec in type_specs:
-        zone = find_zone_for_instance_type(region_client, region_name, spec.name, preferred)
-        if not zone:
-            logger.warning(f"instance type {spec.name} not available in {region_name}")
-            continue
-        plan = AliInstancePlan(instance_type=spec.name, nodes_per_host=spec.nodes_per_host)
-        plans.append(plan)
-        last_available = plan
-        remaining -= spec.nodes_per_host
-        if remaining <= 0:
-            break
 
-    if remaining > 0:
-        if not last_available:
-            raise RuntimeError(f"no available instance types in {region_name}")
-        extra = math.ceil(remaining / last_available.nodes_per_host)
-        plans.extend(
-            [
-                AliInstancePlan(
-                    instance_type=last_available.instance_type,
-                    nodes_per_host=last_available.nodes_per_host,
-                )
-                for _ in range(extra)
-            ]
-        )
-
-    return plans
+def _zones_for_type(region_client, region_name: str, instance_type: str, preferred: Optional[List[str]]) -> List[str]:
+    zones = list_zones_for_instance_type(region_client, region_name, instance_type, preferred)
+    return zones
 
 
 def ports_for_nodes(max_nodes_per_host: int) -> List[int]:
@@ -170,6 +143,38 @@ def provision_aliyun_hosts(
         prefix = f"{common_tag}-{user_tag}"
         regions_used: List[str] = []
 
+        active_regions = [r for r in regions if int(r.get("count", 0)) > 0]
+        image_ids_by_region: Dict[str, str] = {}
+
+        if active_regions:
+            image_name_groups: Dict[str, List[str]] = {}
+            for region_cfg in active_regions:
+                region_name = region_cfg["name"]
+                image_id = region_cfg.get("image") or account_cfg.get("image")
+                if image_id:
+                    image_ids_by_region[region_name] = image_id
+                    continue
+                base_image_name = (
+                    region_cfg.get("base_image_name")
+                    or account_cfg.get("base_image_name")
+                    or DEFAULT_IMAGE_NAME
+                )
+                image_name_groups.setdefault(base_image_name, []).append(region_name)
+
+            cfg_template = EcsConfig(credentials=creds)
+            all_region_names = [r["name"] for r in regions]
+            for image_name, region_list in image_name_groups.items():
+                image_ids_by_region.update(
+                    ensure_images_in_regions(
+                        creds=creds,
+                        target_regions=region_list,
+                        image_name=image_name,
+                        search_regions=all_region_names,
+                        poll_interval=cfg_template.poll_interval,
+                        wait_timeout=cfg_template.wait_timeout,
+                    )
+                )
+
         for region_cfg in regions:
             region_name = region_cfg["name"]
             count = int(region_cfg.get("count", 0))
@@ -183,17 +188,9 @@ def provision_aliyun_hosts(
             region_client = client(creds, region_name, None)
             type_specs = resolve_aliyun_types(region_cfg, account_cfg, hardware_defaults)
             preferred = preferred_zones(region_cfg)
-            plans = plan_region_instances(
-                region_client=region_client,
-                region_name=region_name,
-                count=count,
-                type_specs=type_specs,
-                preferred=preferred,
-            )
-            if not plans:
-                raise RuntimeError(f"no instance plan generated for {region_name}")
+            subnet_map = zone_subnet_map(region_cfg)
 
-            max_nodes_per_host = max(p.nodes_per_host for p in plans)
+            max_nodes_per_host = max(spec.nodes_per_host for spec in type_specs)
             ports = ports_for_nodes(max_nodes_per_host)
 
             cfg = EcsConfig(credentials=creds, region_id=region_name)
@@ -207,91 +204,73 @@ def provision_aliyun_hosts(
             cfg.user_tag_value = user_tag
             cfg.security_group_id = region_cfg.get("security_group_id") or account_cfg.get("security_group_id")
             zones_cfg = region_cfg.get("zones") or []
-            if zones_cfg:
+            if len(zones_cfg) == 1:
                 cfg.zone_id = zones_cfg[0].get("name") or cfg.zone_id
                 cfg.v_switch_id = zones_cfg[0].get("subnet") or cfg.v_switch_id
 
             ensure_keypair(region_client, region_name, cfg.key_pair_name, cfg.ssh_private_key_path)
 
-            image_id = region_cfg.get("image") or account_cfg.get("image")
-            if image_id:
-                cfg.image_id = image_id
-            else:
-                base_image_name = (
-                    region_cfg.get("base_image_name")
-                    or account_cfg.get("base_image_name")
-                    or DEFAULT_IMAGE_NAME
-                )
-                cfg.image_id = ensure_image_in_region(
-                    creds=creds,
-                    region=region_name,
-                    image_name=base_image_name,
-                    search_regions=[r.get("name") for r in regions],
-                    poll_interval=cfg.poll_interval,
-                    wait_timeout=cfg.wait_timeout,
-                )
+            cfg.image_id = image_ids_by_region.get(region_name)
+            if not cfg.image_id:
+                raise RuntimeError(f"image not prepared for {region_name}")
 
             def _no_stock(exc: Exception) -> bool:
                 return "OperationDenied.NoStock" in str(exc)
 
-            skipped_nodes = 0
+            remaining_nodes = count
             last_successful_type: Optional[str] = None
             last_successful_nodes: Optional[int] = None
 
-            for plan in plans:
-                zone_candidates = list_zones_for_instance_type(region_client, region_name, plan.instance_type, preferred)
+            for spec in type_specs:
+                if remaining_nodes <= 0:
+                    break
+                zone_candidates = _zones_for_type(region_client, region_name, spec.name, preferred)
                 if not zone_candidates:
-                    skipped_nodes += plan.nodes_per_host
+                    logger.warning(f"instance type {spec.name} not available in {region_name}")
                     continue
 
-                created = False
-                for zone_id in zone_candidates:
-                    try:
-                        handle = provision_instance_with_type(cfg, plan.instance_type, zone_id, ports)
-                        hosts.append(
-                            HostSpec(
-                                ip=handle.public_ip,
-                                nodes_per_host=plan.nodes_per_host,
-                                ssh_user=cfg.ssh_username,
-                                ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
-                                provider="aliyun",
+                while remaining_nodes > 0:
+                    created = False
+                    for zone_id in zone_candidates:
+                        zone_subnet = subnet_map.get(zone_id)
+                        try:
+                            handle = provision_instance_with_type(
+                                cfg,
+                                spec.name,
+                                zone_id,
+                                ports,
+                                v_switch_id=zone_subnet,
                             )
-                        )
-                        last_successful_type = plan.instance_type
-                        last_successful_nodes = plan.nodes_per_host
-                        created = True
+                            hosts.append(
+                                HostSpec(
+                                    ip=handle.public_ip,
+                                    nodes_per_host=spec.nodes_per_host,
+                                    ssh_user=cfg.ssh_username,
+                                    ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
+                                    provider="aliyun",
+                                )
+                            )
+                            remaining_nodes -= spec.nodes_per_host
+                            last_successful_type = spec.name
+                            last_successful_nodes = spec.nodes_per_host
+                            created = True
+                            break
+                        except Exception as exc:
+                            if _no_stock(exc):
+                                logger.warning(
+                                    f"no stock for {spec.name} in {region_name}/{zone_id}, trying next zone"
+                                )
+                                continue
+                            raise
+
+                    if not created:
+                        logger.warning(f"no stock in any zone for {spec.name} in {region_name}, trying next type")
                         break
-                    except Exception as exc:
-                        if _no_stock(exc):
-                            logger.warning(
-                                f"no stock for {plan.instance_type} in {region_name}/{zone_id}, trying next zone"
-                            )
-                            continue
-                        raise
 
-                if not created:
-                    logger.warning(f"no stock in any zone for {plan.instance_type} in {region_name}, skipping")
-                    skipped_nodes += plan.nodes_per_host
-
-            if skipped_nodes > 0:
+            if remaining_nodes > 0:
                 if not last_successful_type or not last_successful_nodes:
                     raise RuntimeError(f"no stock for all preferred types in {region_name}")
-                extra = math.ceil(skipped_nodes / last_successful_nodes)
-                zone_candidates = list_zones_for_instance_type(region_client, region_name, last_successful_type, preferred)
-                if not zone_candidates:
-                    raise RuntimeError(f"no zone available for {last_successful_type} in {region_name}")
-                zone_id = zone_candidates[0]
-                for _ in range(extra):
-                    handle = provision_instance_with_type(cfg, last_successful_type, zone_id, ports)
-                    hosts.append(
-                        HostSpec(
-                            ip=handle.public_ip,
-                            nodes_per_host=last_successful_nodes,
-                            ssh_user=cfg.ssh_username,
-                            ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
-                            provider="aliyun",
-                        )
-                    )
+                raise RuntimeError(f"not enough stock to reach {count} nodes in {region_name}")
 
         if regions_used:
             cleanup_targets.append((regions_used, creds, user_tag, prefix))

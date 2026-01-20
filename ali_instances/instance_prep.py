@@ -353,10 +353,18 @@ def provision_instance(cfg: EcsConfig) -> InstanceHandle:
     return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
 
 
-def provision_instance_with_type(cfg: EcsConfig, instance_type: str, zone_id: Optional[str], ports: Sequence[int]) -> InstanceHandle:
+def provision_instance_with_type(
+    cfg: EcsConfig,
+    instance_type: str,
+    zone_id: Optional[str],
+    ports: Sequence[int],
+    v_switch_id: Optional[str] = None,
+) -> InstanceHandle:
     c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
     cfg.instance_type = instance_type
     cfg.zone_id = zone_id or cfg.zone_id
+    if v_switch_id is not None:
+        cfg.v_switch_id = v_switch_id
     ensure_net(c, cfg, ports)
     iid = create_instance(c, cfg, disk_size=100, amount=1)[0]
     logger.info(f"instance: {iid}")

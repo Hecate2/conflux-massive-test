@@ -1,5 +1,6 @@
 """Server image building utilities for Aliyun ECS."""
 import asyncio
+import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional, Sequence, Tuple
 
@@ -32,12 +33,17 @@ def _img_name(prefix: str, ref: str) -> str:
     return DEFAULT_IMAGE_NAME
 
 
-def find_img(c: EcsClient, r: str, name: str) -> Optional[str]:
+def find_img_info(c: EcsClient, r: str, name: str) -> Optional[tuple[str, str]]:
     resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=r, image_name=name, image_owner_alias="self"))
     for i in resp.body.images.image or []:
-        if i.image_name == name:
-            return i.image_id
+        if i.image_name == name and i.image_id:
+            return i.image_id, i.status or ""
     return None
+
+
+def find_img(c: EcsClient, r: str, name: str) -> Optional[str]:
+    info = find_img_info(c, r, name)
+    return info[0] if info else None
 
 
 def find_img_in_regions(
@@ -63,9 +69,12 @@ def ensure_image_in_region(
     wait_timeout: int,
 ) -> str:
     c = client(creds, region, None)
-    existing = find_img(c, region, image_name)
+    existing = find_img_info(c, region, image_name)
     if existing:
-        return existing
+        image_id, status = existing
+        if status != "Available":
+            asyncio.run(wait_images_available({(region, image_id): c}, poll_interval, wait_timeout))
+        return image_id
 
     lookup_regions = [r for r in search_regions if r]
     if region not in lookup_regions:
@@ -80,19 +89,170 @@ def ensure_image_in_region(
 
     logger.info(f"copying image {image_name} from {src_region} to {region}")
     src_client = client(creds, src_region, None)
-    resp = src_client.copy_image(
-        ecs_models.CopyImageRequest(
-            region_id=src_region,
-            destination_region_id=region,
-            image_id=src_image_id,
-            destination_image_name=image_name,
-        )
+    image_id = _copy_image(
+        creds=creds,
+        src_region=src_region,
+        dest_region=region,
+        image_id=src_image_id,
+        image_name=image_name,
+        poll_interval=poll_interval,
+        wait_timeout=wait_timeout,
     )
-    image_id = resp.body.image_id if resp.body else None
-    if not image_id:
-        raise RuntimeError(f"failed to copy image {image_name} to {region}")
     wait_img(c, region, image_id, poll_interval, wait_timeout)
     return image_id
+
+
+def build_base_image_in_region(
+    *,
+    creds: AliCredentials,
+    region: str,
+    image_name: str,
+    poll_interval: int,
+    wait_timeout: int,
+) -> str:
+    cfg = EcsConfig(credentials=creds, region_id=region)
+    cfg.poll_interval = poll_interval
+    cfg.wait_timeout = wait_timeout
+    cfg.base_image_id = find_ubuntu(client(creds, region, None), region)
+    logger.info(f"building base image {image_name} in {region}")
+    return create_server_image(cfg, prepare_fn=prepare_docker_server_image)
+
+
+def _copy_image(
+    *,
+    creds: AliCredentials,
+    src_region: str,
+    dest_region: str,
+    image_id: str,
+    image_name: str,
+    poll_interval: int,
+    wait_timeout: int,
+) -> str:
+    src_client = client(creds, src_region, None)
+    try:
+        resp = src_client.copy_image(
+            ecs_models.CopyImageRequest(
+                region_id=src_region,
+                destination_region_id=dest_region,
+                image_id=image_id,
+                destination_image_name=image_name,
+            )
+        )
+    except Exception as exc:
+        if "InvalidImageName.Duplicated" in str(exc):
+            # Image with the same name already exists in the destination region
+            # but is not available because it is still being copied.
+            # query the image ID by name.
+            dest_client = client(creds, dest_region, None)
+            existing = find_img_info(dest_client, dest_region, image_name)
+            if existing:
+                logger.info(f"found existing image {existing[0]} of name {image_name} in {dest_region} of state {existing[1]}. Probably being copied. Will wait for it to be available.")
+                return existing[0]
+        raise
+    copied_id = resp.body.image_id if resp.body else None
+    if not copied_id:
+        raise RuntimeError(f"failed to copy image {image_name} to {dest_region}")
+    return copied_id
+
+
+async def wait_images_available(
+    pending: dict[tuple[str, str], EcsClient],
+    poll_interval: int,
+    wait_timeout: int,
+) -> None:
+    start = asyncio.get_event_loop().time()
+    while pending:
+        if asyncio.get_event_loop().time() - start > wait_timeout:
+            raise RuntimeError("timeout waiting for image copies")
+        done: list[tuple[str, str]] = []
+        for (region, image_id), c in pending.items():
+            resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=region, image_id=image_id))
+            imgs = resp.body.images.image if resp.body and resp.body.images else []
+            if not imgs:
+                continue
+            st = imgs[0].status
+            logger.info(f"image {image_id} in {region}: {st}")
+            if st in {"CreateFailed", "Deprecated"}:
+                raise RuntimeError(f"image failed: {st}")
+            if st == "Available":
+                done.append((region, image_id))
+        for key in done:
+            pending.pop(key, None)
+        if pending:
+            await asyncio.sleep(poll_interval)
+
+
+def ensure_images_in_regions(
+    *,
+    creds: AliCredentials,
+    target_regions: Sequence[str],
+    image_name: str,
+    search_regions: Optional[Sequence[str]] = None,
+    poll_interval: int,
+    wait_timeout: int,
+) -> dict[str, str]:
+    region_list = [r for r in target_regions if r]
+    if not region_list:
+        return {}
+
+    image_map: dict[str, str] = {}
+    missing: list[str] = []
+    pending_existing: dict[tuple[str, str], EcsClient] = {}
+    for region in region_list:
+        c = client(creds, region, None)
+        info = find_img_info(c, region, image_name)
+        if info:
+            image_id, status = info
+            image_map[region] = image_id
+            if status != "Available":
+                pending_existing[(region, image_id)] = c
+        else:
+            missing.append(region)
+
+    if pending_existing:
+        asyncio.run(wait_images_available(pending_existing, poll_interval=poll_interval, wait_timeout=wait_timeout))
+
+    if not missing:
+        return image_map
+
+    lookup_regions = [r for r in (search_regions or region_list) if r]
+    found = find_img_in_regions(creds, lookup_regions, image_name)
+    if not found:
+        build_region = region_list[0]
+        built_id = build_base_image_in_region(
+            creds=creds,
+            region=build_region,
+            image_name=image_name,
+            poll_interval=poll_interval,
+            wait_timeout=wait_timeout,
+        )
+        image_map[build_region] = built_id
+        src_region, src_image_id = build_region, built_id
+    else:
+        src_region, src_image_id = found
+        image_map[src_region] = src_image_id
+
+    pending: dict[tuple[str, str], EcsClient] = {}
+    for region in missing:
+        if region == src_region:
+            continue
+        logger.info(f"copying image {image_name} from {src_region} to {region}")
+        copied_id = _copy_image(
+            creds=creds,
+            src_region=src_region,
+            dest_region=region,
+            image_id=src_image_id,
+            image_name=image_name,
+            poll_interval=poll_interval,
+            wait_timeout=wait_timeout,
+        )
+        image_map[region] = copied_id
+        pending[(region, copied_id)] = client(creds, region, None)
+
+    if pending:
+        asyncio.run(wait_images_available(pending, poll_interval=poll_interval, wait_timeout=wait_timeout))
+
+    return image_map
 
 
 def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -> str:
