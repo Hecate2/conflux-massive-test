@@ -1,5 +1,6 @@
 """Server image building utilities for Aliyun ECS."""
 import asyncio
+import shlex
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional, Sequence, Tuple
 
@@ -27,6 +28,10 @@ from .instance_prep import (
 
 # --- Image ---
 DEFAULT_IMAGE_NAME = "conflux-docker-base"
+
+
+def _build_conflux_script_source() -> Path:
+    return Path(__file__).resolve().parent.parent / "auxiliary" / "scripts" / "remote" / "build_conflux_binary.sh"
 
 def _img_name(prefix: str, ref: str) -> str:
     return DEFAULT_IMAGE_NAME
@@ -317,12 +322,21 @@ async def default_prepare(host: str, cfg: EcsConfig) -> None:
             "if [ ! -d /opt/conflux/src/conflux-rust ]; then sudo git clone --depth 1 "
             "https://github.com/Conflux-Chain/conflux-rust.git /opt/conflux/src/conflux-rust; fi"
         )
-        await run(
-            "sudo bash -lc 'cd /opt/conflux/src/conflux-rust; git fetch --depth 1 origin "
-            f"{cfg.conflux_git_ref} || true; git checkout {cfg.conflux_git_ref} || git checkout FETCH_HEAD; "
-            "git submodule update --init --recursive; curl https://sh.rustup.rs -sSf | sh -s -- -y; "
-            "source $HOME/.cargo/env; cargo build --release --bin conflux; install -m 0755 target/release/conflux /usr/local/bin/conflux'"
+        script_local = _build_conflux_script_source()
+        if not script_local.exists():
+            raise FileNotFoundError(f"build script not found: {script_local}")
+        remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
+        await asyncssh.scp(str(script_local), (conn, remote_script))
+        build_cmd = " ".join(
+            [
+                "sudo bash",
+                shlex.quote(remote_script),
+                shlex.quote("/opt/conflux/src/conflux-rust"),
+                shlex.quote(cfg.conflux_git_ref),
+            ]
         )
+        await run(build_cmd)
+        await run(f"sudo rm -f {shlex.quote(remote_script)}")
 
 
 async def prepare_docker_server_image(host: str, cfg: EcsConfig) -> None:

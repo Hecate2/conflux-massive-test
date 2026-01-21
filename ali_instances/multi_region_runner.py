@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
 
-from ali_instances.cleanup_resources import cleanup_all_regions
 from ali_instances.config import AliCredentials, EcsConfig, client
 from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_images_in_regions
 from ali_instances.instance_prep import (
@@ -288,6 +287,8 @@ def provision_aliyun_hosts(
 
 
 def cleanup_targets(targets: List[CleanupTarget], common_tag: str = "conflux-massive-test") -> None:
+    from ali_instances.cleanup_resources import cleanup_all_regions
+
     for regions, creds, user_tag, prefix in targets:
         cleanup_all_regions(
             regions=regions,

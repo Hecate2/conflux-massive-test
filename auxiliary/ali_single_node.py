@@ -1,4 +1,5 @@
 import asyncio
+import shlex
 import socket
 import tarfile
 import time
@@ -171,7 +172,15 @@ def check_transaction_processing(
 
 
 def _pos_config_source() -> Path:
-    return Path(__file__).resolve().parent / "ref" / "zero-gravity-swap" / "pos_config"
+    return Path(__file__).resolve().parent.parent / "ref" / "zero-gravity-swap" / "pos_config"
+
+
+def _docker_service_script_source() -> Path:
+    return Path(__file__).resolve().parent / "scripts" / "remote" / "setup_docker_conflux_service.sh"
+
+
+def _ensure_conflux_binary_script_source() -> Path:
+    return Path(__file__).resolve().parent / "scripts" / "remote" / "ensure_conflux_binary.sh"
 
 
 async def deploy_conflux_node(host: str, instance: EcsConfig, node: SingleNodeConfig) -> None:
@@ -197,20 +206,21 @@ async def deploy_conflux_node(host: str, instance: EcsConfig, node: SingleNodeCo
         await run_remote(f"sudo mkdir -p {node.data_dir}", check=True)
         await run_remote("sudo mkdir -p /opt/conflux/logs", check=True)
         await run_remote("sudo mkdir -p /opt/conflux/pos_config", check=True)
-        await run_remote(
-            "sudo bash -lc 'set -e; "
-            "if [ ! -x "
-            f"{node.conflux_bin}"
-            " ]; then "
-            "if [ -d /opt/conflux/src/conflux-rust ]; then "
-            "cd /opt/conflux/src/conflux-rust; "
-            "if [ -f $HOME/.cargo/env ]; then . $HOME/.cargo/env; fi; "
-            "cargo build --release --bin conflux; "
-            "install -m 0755 target/release/conflux /usr/local/bin/conflux; "
-            "fi; "
-            "fi'",
-            check=True,
+        script_local = _ensure_conflux_binary_script_source()
+        if not script_local.exists():
+            raise FileNotFoundError(f"ensure-conflux script not found: {script_local}")
+        remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
+        await asyncssh.scp(str(script_local), (conn, remote_script))
+        ensure_cmd = " ".join(
+            [
+                "sudo bash",
+                shlex.quote(remote_script),
+                shlex.quote(node.conflux_bin),
+                shlex.quote("/opt/conflux/src/conflux-rust"),
+            ]
         )
+        await run_remote(ensure_cmd, check=True)
+        await run_remote(f"sudo rm -f {shlex.quote(remote_script)}", check=False)
         await run_remote(f"sudo test -x {node.conflux_bin}", check=True)
 
         config_text = single_node_config_text(node)
@@ -284,38 +294,23 @@ async def start_docker_conflux_service(host: str, instance: EcsConfig, service_n
         client_keys=[key_path],
         known_hosts=None,
     ) as conn:
-        setup_cmd = (
-            "sudo bash -lc 'set -e; "
-            f"if [ ! -f /etc/systemd/system/{service_name}.service ]; then "
-            "cat > /usr/local/bin/"
-            f"{service_name}-run.sh << \"EOF\"\n"
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f"docker rm -f {service_name} >/dev/null 2>&1 || true\n"
-            "exec docker run --rm \\\n  --name "
-            f"{service_name} \\\n  --net=host \\\n  --privileged \\\n  --ulimit nofile=65535:65535 \\\n  --ulimit nproc=65535:65535 \\\n  --ulimit core=-1 \\\n  -v /opt/conflux/config:/opt/conflux/config \\\n  -v /opt/conflux/data:/opt/conflux/data \\\n  -v /opt/conflux/logs:/opt/conflux/logs \\\n  -v /opt/conflux/pos_config:/opt/conflux/pos_config \\\n  -v /opt/conflux/pos_config:/app/pos_config \\\n  -w /opt/conflux/logs \\\n  conflux-single-node:latest \\\n  /root/conflux --config /opt/conflux/config/conflux_0.toml\n"
-            "EOF\n"
-            f"chmod +x /usr/local/bin/{service_name}-run.sh; "
-            "cat > /etc/systemd/system/"
-            f"{service_name}.service << \"EOF\"\n"
-            "[Unit]\n"
-            f"Description=Conflux single node ({service_name})\n"
-            "After=docker.service\n"
-            "Requires=docker.service\n\n"
-            "[Service]\n"
-            "Type=simple\n"
-            f"ExecStart=/usr/local/bin/{service_name}-run.sh\n"
-            f"ExecStop=/usr/bin/docker stop {service_name}\n"
-            "Restart=always\n"
-            "RestartSec=5\n\n"
-            "[Install]\n"
-            "WantedBy=multi-user.target\n"
-            "EOF\n"
-            "systemctl daemon-reload; "
-            f"systemctl enable {service_name}.service; "
-            "fi'"
+        script_local = _docker_service_script_source()
+        if not script_local.exists():
+            raise FileNotFoundError(f"docker service setup script not found: {script_local}")
+        remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
+        await asyncssh.scp(str(script_local), (conn, remote_script))
+        setup_cmd = " ".join(
+            [
+                "sudo bash",
+                shlex.quote(remote_script),
+                shlex.quote(service_name),
+                shlex.quote("conflux-single-node:latest"),
+                shlex.quote("/root/conflux"),
+                shlex.quote("/opt/conflux/config/conflux_0.toml"),
+            ]
         )
         await conn.run(setup_cmd, check=False)
+        await conn.run(f"sudo rm -f {shlex.quote(remote_script)}", check=False)
         await conn.run(f"sudo systemctl start {service_name}.service", check=False)
         await conn.run(f"sudo systemctl status {service_name}.service --no-pager", check=False)
 

@@ -24,7 +24,7 @@ DEFAULT_EVM_CHAIN_ID = 1025
 
 
 def _pos_config_source() -> Path:
-    return Path(__file__).resolve().parent / "ref" / "zero-gravity-swap" / "pos_config"
+    return Path(__file__).resolve().parent.parent / "ref" / "zero-gravity-swap" / "pos_config"
 
 
 async def deploy_docker_conflux(host: str, cfg: EcsConfig, node: SingleNodeConfig, image: str, service_name: str) -> None:
