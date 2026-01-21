@@ -199,13 +199,6 @@ def list_zones_for_instance_type(
     return zones
 
 
-def find_zone_for_instance_type(
-    c: EcsClient, r: str, instance_type: str, preferred_zones: Optional[Sequence[str]] = None
-) -> Optional[str]:
-    zones = list_zones_for_instance_type(c, r, instance_type, preferred_zones)
-    return zones[0] if zones else None
-
-
 def pick_instance_type(c: EcsClient, cfg: EcsConfig) -> Optional[tuple[str, str, Optional[str]]]:
     spot = cfg.spot_strategy if cfg.use_spot else None
     req = ecs_models.DescribeAvailableResourceRequest(
@@ -335,22 +328,29 @@ class InstanceHandle:
     public_ip: str
 
 
+def _provision_instance(c: EcsClient, cfg: EcsConfig, ports: Sequence[int], disk_size: int) -> InstanceHandle:
+    ensure_net(c, cfg, ports)
+    iid = create_instance(c, cfg, disk_size=disk_size, amount=1)[0]
+    logger.info(f"instance: {iid}")
+    st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
+    if st == "Stopped":
+        try:
+            start_instance(c, iid)
+        except Exception as exc:
+            logger.warning(f"start_instance failed for {iid}: {exc}. Will wait for instance to become Running.")
+    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    logger.info(f"instance ready: {ip}")
+    return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
+
+
 def provision_instance(cfg: EcsConfig) -> InstanceHandle:
     c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
     sel = pick_instance_type(c, cfg)
     if not sel:
         raise RuntimeError("no instance type")
     cfg.zone_id, cfg.instance_type, cfg.cpu_vendor = sel
-    ensure_net(c, cfg)
-    iid = create_instance(c, cfg, disk_size=100, amount=1)[0]
-    logger.info(f"instance: {iid}")
-    st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-    if st == "Stopped":
-        start_instance(c, iid)
-    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    logger.info(f"instance ready: {ip}")
-    return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
+    return _provision_instance(c, cfg, ports=(), disk_size=100)
 
 
 def provision_instance_with_type(
@@ -365,16 +365,7 @@ def provision_instance_with_type(
     cfg.zone_id = zone_id or cfg.zone_id
     if v_switch_id is not None:
         cfg.v_switch_id = v_switch_id
-    ensure_net(c, cfg, ports)
-    iid = create_instance(c, cfg, disk_size=100, amount=1)[0]
-    logger.info(f"instance: {iid}")
-    st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-    if st == "Stopped":
-        start_instance(c, iid)
-    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    logger.info(f"instance ready: {ip}")
-    return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
+    return _provision_instance(c, cfg, ports=ports, disk_size=100)
 
 
 def cleanup_instance(h: InstanceHandle) -> None:

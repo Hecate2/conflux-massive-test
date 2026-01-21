@@ -1,6 +1,7 @@
 """Aliyun provisioning helpers based on instance-region.json."""
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,9 +92,6 @@ def zone_subnet_map(region_cfg: Dict) -> Dict[str, str]:
     return mapping
 
 
-def _zones_for_type(region_client, region_name: str, instance_type: str, preferred: Optional[List[str]]) -> List[str]:
-    zones = list_zones_for_instance_type(region_client, region_name, instance_type, preferred)
-    return zones
 
 
 def ports_for_nodes(max_nodes_per_host: int) -> List[int]:
@@ -175,15 +173,10 @@ def provision_aliyun_hosts(
                     )
                 )
 
-        for region_cfg in regions:
+        def _provision_region(region_cfg: Dict) -> tuple[str, List[HostSpec]]:
             region_name = region_cfg["name"]
             node_count = int(region_cfg.get("count", 0))
-            if node_count <= 0:
-                continue
-
             logger.info(f"准备在 {region_name} 启动 {node_count} 个 Conflux 节点")
-            if region_name not in regions_used:
-                regions_used.append(region_name)
 
             region_client = client(creds, region_name, None)
             type_specs = resolve_aliyun_types(region_cfg, account_cfg, hardware_defaults)
@@ -220,11 +213,12 @@ def provision_aliyun_hosts(
             remaining_nodes = node_count
             last_successful_type: Optional[str] = None
             last_successful_nodes: Optional[int] = None
+            region_hosts: List[HostSpec] = []
 
             for spec in type_specs:
                 if remaining_nodes <= 0:
                     break
-                zone_candidates = _zones_for_type(region_client, region_name, spec.name, preferred)
+                zone_candidates = list_zones_for_instance_type(region_client, region_name, spec.name, preferred)
                 if not zone_candidates:
                     logger.warning(f"instance type {spec.name} not available in {region_name}")
                     continue
@@ -241,7 +235,7 @@ def provision_aliyun_hosts(
                                 ports,
                                 v_switch_id=zone_subnet,
                             )
-                            hosts.append(
+                            region_hosts.append(
                                 HostSpec(
                                     ip=handle.public_ip,
                                     nodes_per_host=spec.nodes_per_host,
@@ -271,6 +265,19 @@ def provision_aliyun_hosts(
                 if not last_successful_type or not last_successful_nodes:
                     raise RuntimeError(f"no stock for all preferred types in {region_name}")
                 raise RuntimeError(f"not enough stock to reach {node_count} nodes in {region_name}")
+
+            return region_name, region_hosts
+
+        active_regions = [r for r in regions if int(r.get("count", 0)) > 0]
+        if active_regions:
+            async def _provision_all_regions() -> List[tuple[str, List[HostSpec]]]:
+                tasks = [asyncio.to_thread(_provision_region, region_cfg) for region_cfg in active_regions]
+                return await asyncio.gather(*tasks)
+
+            for region_name, region_hosts in asyncio.run(_provision_all_regions()):
+                hosts.extend(region_hosts)
+                if region_name not in regions_used:
+                    regions_used.append(region_name)
 
         if regions_used:
             cleanup_targets.append((regions_used, creds, user_tag, prefix))

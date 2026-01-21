@@ -1,6 +1,5 @@
 """Server image building utilities for Aliyun ECS."""
 import asyncio
-import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional, Sequence, Tuple
 
@@ -59,7 +58,7 @@ def find_img_in_regions(
     return None
 
 
-def ensure_image_in_region(
+async def ensure_image_in_region(
     *,
     creds: AliCredentials,
     region: str,
@@ -73,7 +72,7 @@ def ensure_image_in_region(
     if existing:
         image_id, status = existing
         if status != "Available":
-            asyncio.run(wait_images_available({(region, image_id): c}, poll_interval, wait_timeout))
+            await wait_images_available({(region, image_id): c}, poll_interval, wait_timeout)
         return image_id
 
     lookup_regions = [r for r in search_regions if r]
@@ -88,7 +87,6 @@ def ensure_image_in_region(
         return src_image_id
 
     logger.info(f"copying image {image_name} from {src_region} to {region}")
-    src_client = client(creds, src_region, None)
     image_id = _copy_image(
         creds=creds,
         src_region=src_region,
@@ -194,28 +192,9 @@ def ensure_images_in_regions(
     region_list = [r for r in target_regions if r]
     if not region_list:
         return {}
-
-    image_map: dict[str, str] = {}
-    missing: list[str] = []
-    pending_existing: dict[tuple[str, str], EcsClient] = {}
-    for region in region_list:
-        c = client(creds, region, None)
-        info = find_img_info(c, region, image_name)
-        if info:
-            image_id, status = info
-            image_map[region] = image_id
-            if status != "Available":
-                pending_existing[(region, image_id)] = c
-        else:
-            missing.append(region)
-
-    if pending_existing:
-        asyncio.run(wait_images_available(pending_existing, poll_interval=poll_interval, wait_timeout=wait_timeout))
-
-    if not missing:
-        return image_map
-
     lookup_regions = [r for r in (search_regions or region_list) if r]
+    image_map: dict[str, str] = {}
+
     found = find_img_in_regions(creds, lookup_regions, image_name)
     if not found:
         build_region = region_list[0]
@@ -227,31 +206,28 @@ def ensure_images_in_regions(
             wait_timeout=wait_timeout,
         )
         image_map[build_region] = built_id
-        src_region, src_image_id = build_region, built_id
+        if build_region not in lookup_regions:
+            lookup_regions.append(build_region)
     else:
         src_region, src_image_id = found
         image_map[src_region] = src_image_id
 
-    pending: dict[tuple[str, str], EcsClient] = {}
-    for region in missing:
-        if region == src_region:
-            continue
-        logger.info(f"copying image {image_name} from {src_region} to {region}")
-        copied_id = _copy_image(
-            creds=creds,
-            src_region=src_region,
-            dest_region=region,
-            image_id=src_image_id,
-            image_name=image_name,
-            poll_interval=poll_interval,
-            wait_timeout=wait_timeout,
-        )
-        image_map[region] = copied_id
-        pending[(region, copied_id)] = client(creds, region, None)
+    async def _ensure_all() -> dict[str, str]:
+        tasks = [
+            ensure_image_in_region(
+                creds=creds,
+                region=region,
+                image_name=image_name,
+                search_regions=lookup_regions,
+                poll_interval=poll_interval,
+                wait_timeout=wait_timeout,
+            )
+            for region in region_list
+        ]
+        results = await asyncio.gather(*tasks)
+        return {region: image_id for region, image_id in zip(region_list, results)}
 
-    if pending:
-        asyncio.run(wait_images_available(pending, poll_interval=poll_interval, wait_timeout=wait_timeout))
-
+    image_map.update(asyncio.run(_ensure_all()))
     return image_map
 
 
@@ -402,7 +378,10 @@ def create_server_image(
         logger.info(f"builder: {iid}")
         st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
         if st == "Stopped":
-            start_instance(c, iid)
+            try:
+                start_instance(c, iid)
+            except Exception as exc:
+                logger.warning(f"start_instance failed for {iid}: {exc}. Will wait for instance to become Running.")
         wait_status(c, cfg.region_id, iid, ["Running"], cfg.poll_interval, cfg.wait_timeout)
         allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
         ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)

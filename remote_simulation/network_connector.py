@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, Future
+import time
 from typing import List, Tuple
 
 from loguru import logger
@@ -14,9 +15,15 @@ def connect_nodes(nodes: List[RemoteNode],
                     handshake_timeout: int = 120,
                     max_workers: int = 300,
                     min_peers: int = 3,
+                    retry_attempts: int = 2,
+                    retry_interval: int = 5,
                     ):
     return NetworkConnector(nodes, topology, connection_timeout,
-                     handshake_timeout, max_workers)._connect_topology(min_peers)
+                     handshake_timeout, max_workers)._connect_topology(
+                         min_peers=min_peers,
+                         retry_attempts=retry_attempts,
+                         retry_interval=retry_interval,
+                     )
 
 
 class NetworkConnector:
@@ -45,7 +52,9 @@ class NetworkConnector:
 
     def _connect_topology(
         self,
-        min_peers: int = 3
+        min_peers: int = 3,
+        retry_attempts: int = 2,
+        retry_interval: int = 5,
     ) -> None:
         """
         根据拓扑结构建立网络连接
@@ -57,28 +66,34 @@ class NetworkConnector:
         Raises:
             Exception: 连接失败节点数超过阈值时抛出
         """
-        # 第一步：提交所有连接任务
-        executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        futures = self._submit_connection_tasks(executor, min_peers)
+        pending_nodes = list(range(len(self.nodes)))
+        attempt = 0
+        failed_nodes: List[int] = []
+        while True:
+            attempt += 1
+            executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            futures = self._submit_connection_tasks(executor, min_peers, pending_nodes)
+            _, failed_nodes = self._collect_results(futures)
+            executor.shutdown(wait=True)
 
-        # 第二步：收集结果
-        success_count, failed_nodes = self._collect_results(futures)
-
-        # 第三步：清理资源
-        executor.shutdown(wait=True)
-
-        if len(failed_nodes) > 0:
-            raise Exception("部分节点建立连接失败")
+            if not failed_nodes:
+                return
+            if attempt > retry_attempts:
+                raise Exception("部分节点建立连接失败")
+            logger.warning(f"连接未满足要求，将在 {retry_interval}s 后重试 ({attempt}/{retry_attempts})")
+            time.sleep(retry_interval)
+            pending_nodes = failed_nodes
 
     def _submit_connection_tasks(
         self,
         executor: ThreadPoolExecutor,
-        min_peers: int
+        min_peers: int,
+        node_indices: List[int]
     ) -> List[Tuple[int, Future]]:
         """提交所有连接任务"""
         futures = []
 
-        for node_idx in range(len(self.nodes)):
+        for node_idx in node_indices:
             peers_with_latencies = self.topology.get_peers_with_latency(node_idx)
 
             future = executor.submit(
