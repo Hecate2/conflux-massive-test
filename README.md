@@ -8,7 +8,7 @@ A distributed testing framework for Conflux blockchain nodes across cloud provid
 
 - Python 3.11+
 - Aliyun account with ECS access (or AWS for legacy runs)
-- SSH private key available locally (optional): set `SSH_KEY_PATH` to point to your SSH private key. If `SSH_KEY_PATH` is not set and the repository contains `keys/chenxinghao-conflux-image-builder.pem`, that key will be used automatically.
+- SSH private key available locally (optional): set `SSH_KEY_PATH` to point to your SSH private key. If `SSH_KEY_PATH` is not set and the repository contains `keys/ssh-key.pem`, that key will be used automatically.
 
 ### Installation
 
@@ -26,10 +26,10 @@ pip install -r requirements.txt
 ./.venv/bin/python -m ali_instances.create_servers --config instance-region.json --hardware config/hardware.json
 ```
 
-Note: The orchestration connects to instances as the `root` user by default (do not rely on the `ubuntu` user). The SSH private key used for connections is read from the `SSH_KEY_PATH` environment variable. If `SSH_KEY_PATH` is not set and the repository contains `keys/chenxinghao-conflux-image-builder.pem`, that key will be used automatically. Example:
+Note: The orchestration connects to instances as the `root` user by default (do not rely on the `ubuntu` user). The SSH private key used for connections is read from the `SSH_KEY_PATH` environment variable. If `SSH_KEY_PATH` is not set and the repository contains `keys/ssh-key.pem`, that key will be used automatically. Example:
 
 ```bash
-SSH_KEY_PATH=keys/chenxinghao-conflux-image-builder.pem ./.venv/bin/python remote_simulate_ali.py
+SSH_KEY_PATH=keys/ssh-key.pem ./.venv/bin/python remote_simulate_ali.py
 ```
 
 3. Run the simulation (reads `ali_servers.json`, does NOT create or delete instances):
@@ -113,7 +113,7 @@ If neither source provides credentials, provisioning will raise an error.
 |-------|----------|-------------|
 | `access_key_id` | No | If empty, uses `ALI_ACCESS_KEY_ID` env var |
 | `access_key_secret` | No | If empty, uses `ALI_ACCESS_KEY_SECRET` env var |
-| `user_tag` | No | Defaults to `chenxinghao`. Used for resource naming |
+| `user_tag` | No | Used for resource naming |
 | `type` | No | Preferred instance types (see below) |
 | `regions` | Yes | List of regions to deploy |
 

@@ -4,7 +4,6 @@
 This script provisions hosts, launches nodes, runs the experiment, and collects logs.
 Configuration is read from instance-region.json.
 """
-import datetime
 import json
 import os
 import time
@@ -153,7 +152,7 @@ if __name__ == "__main__":
     if not hosts:
         raise RuntimeError("no hosts found in ali_servers.json")
 
-    default_key = root / "keys" / "chenxinghao-conflux-image-builder.pem"
+    default_key = root / "keys" / "ssh-key.pem"
     if "SSH_KEY_PATH" not in os.environ and default_key.exists():
         os.environ["SSH_KEY_PATH"] = str(default_key)
 

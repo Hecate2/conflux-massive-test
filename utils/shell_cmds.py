@@ -7,7 +7,7 @@ from loguru import logger
 
 
 def _ssh_key_args() -> List[str]:
-    key_path = os.getenv("SSH_KEY_PATH", "keys/chenxinghao-conflux-image-builder.pem").strip()
+    key_path = os.getenv("SSH_KEY_PATH", "keys/ssh-key.pem").strip()
     if not key_path:
         return []
     return ["-i", key_path]

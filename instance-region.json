@@ -3,7 +3,7 @@
       {
          "access_key_id":"",
          "access_key_secret":"",
-         "user_tag":"chenxinghao",
+         "user_tag":"your_name",
          "base_image_name":"conflux-docker-base",
          "regions":[
             {

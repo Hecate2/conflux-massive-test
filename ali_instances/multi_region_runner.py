@@ -5,11 +5,11 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from ali_instances.config import AliCredentials, EcsConfig, client
+from ali_instances.config import AliCredentials, EcsConfig, client, DEFAULT_USER_TAG_VALUE
 from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_images_in_regions
 from ali_instances.instance_prep import (
     ensure_keypair,
@@ -136,7 +136,7 @@ def provision_aliyun_hosts(
     for account_cfg in aliyun_cfgs:
         regions = account_cfg.get("regions", [])
         creds = resolve_aliyun_credentials(account_cfg)
-        user_tag = account_cfg.get("user_tag", "chenxinghao")
+        user_tag = account_cfg.get("user_tag", DEFAULT_USER_TAG_VALUE)
         prefix = f"{common_tag}-{user_tag}"
         regions_used: List[str] = []
 

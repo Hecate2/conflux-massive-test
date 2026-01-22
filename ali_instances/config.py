@@ -8,15 +8,15 @@ from alibabacloud_tea_openapi.models import Config as AliyunConfig
 from dotenv import load_dotenv
 
 DEFAULT_REGION = "ap-southeast-3"
-DEFAULT_KEYPAIR = "chenxinghao-conflux-image-builder"
-DEFAULT_SSH_KEY = "./keys/chenxinghao-conflux-image-builder.pem"
+DEFAULT_KEYPAIR = "conflux-image-builder-ssh-key"
+DEFAULT_SSH_KEY = "./keys/ssh-key.pem"
 DEFAULT_VPC = "conflux-image-builder"
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
 DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
 DEFAULT_COMMON_TAG_KEY = "conflux-massive-test"
 DEFAULT_COMMON_TAG_VALUE = "true"
 DEFAULT_USER_TAG_KEY = "user"
-DEFAULT_USER_TAG_VALUE = "chenxinghao"
+DEFAULT_USER_TAG_VALUE = "your_name"
 
 
 @dataclass

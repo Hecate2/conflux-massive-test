@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional
 from alibabacloud_ecs20140526 import models as ecs_models
 from loguru import logger
 
-from .config import EcsConfig, load_credentials, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY, DEFAULT_USER_TAG_VALUE
+from .config import EcsConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY, DEFAULT_USER_TAG_VALUE
 from .instance_prep import delete_instance
 from .config import client
 
