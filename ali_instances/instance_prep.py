@@ -128,7 +128,44 @@ def _vpc_available(c: EcsClient, r: str, vid: str) -> bool:
     return vpcs and vpcs[0].status == "Available"
 
 
-def ensure_vswitch(c: EcsClient, r: str, vpc: str, zone: str, name: str, cidr: str, vpc_cidr: str) -> str:
+def ensure_vswitch(
+    c: EcsClient,
+    r: str,
+    vpc: str,
+    zone: str,
+    name: str,
+    cidr: str,
+    vpc_cidr: str,
+    existing_vswitch_id: Optional[str] = None,
+) -> str:
+    """Validate and/or create a vSwitch in the specified zone.
+
+    If `existing_vswitch_id` is provided and valid (belongs to the same zone and VPC
+    and is Available), it will be reused. Otherwise, try to find a vSwitch by the
+    standard name ("{name}-zone{zone}") or create a new one.
+    """
+    # If caller gave explicit vSwitch id, validate it first and reuse if OK
+    if existing_vswitch_id:
+        try:
+            resp = c.describe_vswitches(
+                ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=existing_vswitch_id)
+            )
+            vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
+            if vsws:
+                v = vsws[0]
+                if not (v.zone_id == zone and v.vpc_id == vpc):
+                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} exists but is in zone {v.zone_id} (expected zone {zone}).")
+                    raise RuntimeError("vSwitch in wrong zone/vpc")
+                if v.status != "Available":
+                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} in vpc {vpc} has status {v.status}.")
+                    raise RuntimeError("vSwitch not Available")
+                return existing_vswitch_id
+
+        except Exception as exc:
+            logger.warning(f"invalid vSwitch {existing_vswitch_id}: {exc}. Will (re)create.")
+
+    # Normal path: find by name in this VPC/zone or create one
+    name = f"{name}-zone{zone}"
     resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, vpc_id=vpc, page_size=50))
     vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
     for v in vsws:
@@ -183,8 +220,18 @@ def auth_port(c: EcsClient, r: str, sg: str, port: int) -> None:
 def ensure_net(c: EcsClient, cfg: EcsConfig, ports: Sequence[int] = ()) -> None:
     cfg.zone_id = cfg.zone_id or pick_zone(c, cfg.region_id)
     vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr)
-    cfg.v_switch_id = cfg.v_switch_id or ensure_vswitch(
-        c, cfg.region_id, vpc, cfg.zone_id, cfg.vswitch_name, cfg.vswitch_cidr, cfg.vpc_cidr
+    # Validate or create vSwitch in a single place. If caller supplied an explicit
+    # vSwitch id, pass it to ensure_vswitch so it can be validated and reused when
+    # possible. This avoids multiple describe_vswitches calls and duplicate logic.
+    cfg.v_switch_id = ensure_vswitch(
+        c,
+        cfg.region_id,
+        vpc,
+        cfg.zone_id,
+        cfg.vswitch_name,
+        cfg.vswitch_cidr,
+        cfg.vpc_cidr,
+        existing_vswitch_id=cfg.v_switch_id,
     )
     cfg.security_group_id = cfg.security_group_id or ensure_sg(c, cfg.region_id, vpc, cfg.security_group_name)
     tags = _tag_dict(cfg)
