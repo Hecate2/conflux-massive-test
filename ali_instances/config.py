@@ -6,10 +6,11 @@ from typing import Optional
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 from dotenv import load_dotenv
+load_dotenv()
 
 DEFAULT_REGION = "ap-southeast-3"
 DEFAULT_KEYPAIR = "conflux-image-builder-ssh-key"
-DEFAULT_SSH_KEY = "./keys/ssh-key.pem"
+DEFAULT_SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "./keys/ssh-key.pem")
 DEFAULT_VPC = "conflux-image-builder"
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
 DEFAULT_VSWITCH_CIDR = "10.0.0.0/24"
@@ -49,7 +50,7 @@ class EcsConfig:
     vswitch_cidr: str = DEFAULT_VSWITCH_CIDR
     key_pair_name: str = DEFAULT_KEYPAIR
     ssh_username: str = "root"
-    ssh_private_key_path: str = DEFAULT_SSH_KEY
+    ssh_private_key_path: str = DEFAULT_SSH_KEY_PATH
     conflux_git_ref: str = "v3.0.2"
     image_prefix: str = "conflux"
     instance_name_prefix: str = "conflux-builder"
