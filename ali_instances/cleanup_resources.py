@@ -203,9 +203,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Also delete VPC/VSwitch resources with the matching prefix",
     )
+    parser.add_argument(
+        "--user-tag-value",
+        default=DEFAULT_USER_TAG_VALUE,
+        help="User tag value to match for deletion (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     if args.instances_json:
         cleanup_from_json(Path(args.instances_json))
     else:
-        cleanup_all_regions()
+        logger.info(f"Cleaning up all regions for user {args.user_tag_value}...")
+        cleanup_all_regions(user_tag=args.user_tag_value, delete_network=args.delete_network)
