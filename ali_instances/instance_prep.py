@@ -6,7 +6,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Dict, Tuple
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
@@ -15,6 +15,9 @@ from loguru import logger
 
 from utils.wait_until import wait_until
 from .config import EcsConfig, client
+
+# Cache: maps vswitch_id -> (zone_id, vpc_id). Only store when vswitch is Available.
+_VSWITCH_CACHE: Dict[str, Tuple[str, str]] = {}
 
 
 async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int = 3) -> None:
@@ -144,23 +147,35 @@ def ensure_vswitch(
     and is Available), it will be reused. Otherwise, try to find a vSwitch by the
     standard name ("{name}-zone{zone}") or create a new one.
     """
-    # If caller gave explicit vSwitch id, validate it first and reuse if OK
+    # If caller gave explicit vSwitch id, validate it first and reuse if OK.
+    # Use a short in-memory cache to avoid extra Describe calls when the id was
+    # already validated previously. Only cache when the vSwitch is Available.
     if existing_vswitch_id:
         try:
+            # fast-path: cached mapping (vswitch_id -> (zone, vpc))
+            cached = _VSWITCH_CACHE.get(existing_vswitch_id)
+            if cached:
+                czone, cvpc = cached
+                if czone == zone and cvpc == vpc:
+                    return existing_vswitch_id
+                logger.warning(f"cached vSwitch {existing_vswitch_id} mapped to zone {czone}/vpc {cvpc}, expected {zone}/{vpc}.")
+                raise RuntimeError("vSwitch in wrong zone/vpc")
+
             resp = c.describe_vswitches(
                 ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=existing_vswitch_id)
             )
             vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
             if vsws:
                 v = vsws[0]
-                if not (v.zone_id == zone and v.vpc_id == vpc):
-                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} exists but is in zone {v.zone_id} (expected zone {zone}).")
+                if v.zone_id != zone or v.vpc_id != vpc:
+                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} exists but is in zone {v.zone_id}/vpc {v.vpc_id} (expected {zone}/{vpc}).")
                     raise RuntimeError("vSwitch in wrong zone/vpc")
-                if v.status != "Available":
-                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} in vpc {vpc} has status {v.status}.")
-                    raise RuntimeError("vSwitch not Available")
-                return existing_vswitch_id
 
+                # If vSwitch is already available, cache and reuse it.
+                if v.status != "Available":
+                    wait_until(lambda: _vswitch_ok(c, r, existing_vswitch_id), timeout=120, retry_interval=3)
+                _VSWITCH_CACHE[existing_vswitch_id] = (v.zone_id, v.vpc_id)
+                return existing_vswitch_id
         except Exception as exc:
             logger.warning(f"invalid vSwitch {existing_vswitch_id}: {exc}. Will (re)create.")
 
