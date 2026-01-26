@@ -396,6 +396,10 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         tag=tags,
         amount=amount,
     )
+    if cfg.min_amount_in_zone is not None:
+        min_amount = int(cfg.min_amount_in_zone)
+        min_amount = max(0, min_amount)
+        req.min_amount = min(min_amount, amount)
     if cfg.use_spot:
         req.spot_strategy = cfg.spot_strategy
     if disk:
