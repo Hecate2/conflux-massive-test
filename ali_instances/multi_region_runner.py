@@ -319,37 +319,6 @@ def build_plans_parallel(
     return asyncio.run(_build_all_plans())
 
 
-def build_force_region_plan(
-    region_client,
-    region_cfg: Dict,
-    account_cfg: Dict,
-    hardware_defaults: Dict[str, int],
-) -> Optional[RegionProvisionPlan]:
-    region_name = region_cfg["name"]
-    node_count = int(region_cfg.get("count", 0))
-    if node_count <= 0:
-        return None
-    type_specs = resolve_aliyun_types(region_cfg, account_cfg, hardware_defaults)
-    preferred = preferred_zones(region_cfg)
-    subnet_map = zone_subnet_map(region_cfg)
-
-    for spec in type_specs:
-        zones = list_zones_for_instance_type(region_client, region_name, spec.name, preferred)
-        if not zones:
-            continue
-        zone_id = zones[0]
-        hosts_needed = math.ceil(node_count / max(spec.nodes_per_host, 1))
-        return RegionProvisionPlan(
-            region_name=region_name,
-            instance_type=spec.name,
-            nodes_per_host=spec.nodes_per_host,
-            hosts_needed=hosts_needed,
-            zone_id=zone_id,
-            v_switch_id=subnet_map.get(zone_id),
-        )
-    return None
-
-
 def wait_instance_ready(region_client, cfg: EcsConfig, instance_id: str) -> str:
     st = wait_status(
         region_client,
@@ -416,15 +385,6 @@ def ensure_region_network(
         )
 
     return region_name, []
-
-
-def provision_region_batch_wrapped(*, region_client, region_cfg: Dict, account_cfg: Dict, plan: RegionProvisionPlan, image_id: str, creds: AliCredentials, prefix: str, common_tag: str, user_tag: str, allow_create_vpc: bool, allow_create_vswitch: bool, allow_create_sg: bool, allow_create_keypair: bool) -> tuple[str, List[HostSpec]]:
-    try:
-        return provision_region_batch(region_client=region_client, region_cfg=region_cfg, account_cfg=account_cfg, plan=plan, image_id=image_id, creds=creds, prefix=prefix, common_tag=common_tag, user_tag=user_tag, allow_create_vpc=allow_create_vpc, allow_create_vswitch=allow_create_vswitch, allow_create_sg=allow_create_sg, allow_create_keypair=allow_create_keypair)
-    except Exception:
-        logger.error(traceback.format_exc())
-        return plan.region_name, []
-
 
 
 def provision_region_batch(
