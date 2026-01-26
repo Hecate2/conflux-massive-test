@@ -115,6 +115,8 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
     if not script_local.exists():
         raise FileNotFoundError(f"missing {script_local}")
 
+    Path(local_path).mkdir(parents=True, exist_ok=True)
+
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
