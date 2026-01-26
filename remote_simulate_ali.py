@@ -76,10 +76,22 @@ def _launch_node(ip_address: str, index: int, counter: AtomicCounter) -> RemoteN
     return node
 
 
-def _execute_instance(ip_address: str, nodes_per_host: int, config_file, pull_docker_image: bool) -> List[RemoteNode]:
+def _execute_instance(
+    ip_address: str,
+    nodes_per_host: int,
+    config_file,
+    pull_docker_image: bool,
+    region: str | None = None,
+) -> List[RemoteNode]:
     try:
         shell_cmds.scp(config_file.path, ip_address, "root", "~/config.toml")
         logger.debug(f"实例 {ip_address} 同步配置完成")
+        if region and region.startswith("cn"):
+            try:
+                shell_cmds.inject_dockerhub_mirrors(ip_address, user="root")
+                logger.debug(f"实例 {ip_address} 已注入 DockerHub 镜像源配置")
+            except Exception as exc:
+                logger.warning(f"实例 {ip_address} 注入 DockerHub 镜像源失败: {exc}")
         if pull_docker_image:
             shell_cmds.ssh(ip_address, "root", docker_cmds.pull_image())
             logger.debug(f"实例 {ip_address} 拉取 docker 镜像完成")
@@ -98,7 +110,7 @@ def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_ima
     logger.info("开始启动所有 Conflux 节点")
 
     def _run_host(host: HostSpec):
-        return _execute_instance(host.ip, host.nodes_per_host, config_file, pull_docker_image)
+        return _execute_instance(host.ip, host.nodes_per_host, config_file, pull_docker_image, host.region)
 
     launch_future = HOST_CONNECT_POOL.map(_run_host, hosts)
     nodes = list(chain.from_iterable(launch_future))

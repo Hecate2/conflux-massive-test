@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import time
@@ -112,3 +113,38 @@ def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None =
             else:
                 logger.debug(f"{ip_address} SSH 失败，已达到最大重试次数")
                 raise
+
+
+def inject_dockerhub_mirrors(
+    ip_address: str,
+    *,
+    user: str = "root",
+    mirrors: List[str] | None = None,
+    max_retries: int = 3,
+    retry_delay: int = 15,
+):
+    if not mirrors:
+        mirrors = [
+            "https://docker.mirrors.ustc.edu.cn",
+            "http://hub-mirror.c.163.com",
+        ]
+    daemon_config = json.dumps({"registry-mirrors": mirrors}, indent=2)
+    cmd = (
+        "set -e\n"
+        "mkdir -p /etc/docker\n"
+        "cat <<'EOF' > /etc/docker/daemon.json\n"
+        f"{daemon_config}\n"
+        "EOF\n"
+        "if command -v systemctl >/dev/null 2>&1; then\n"
+        "  systemctl restart docker\n"
+        "elif command -v service >/dev/null 2>&1; then\n"
+        "  service docker restart\n"
+        "fi\n"
+    )
+    return ssh(
+        ip_address,
+        user,
+        ["bash", "-lc", cmd],
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )
