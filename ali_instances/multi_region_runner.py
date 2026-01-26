@@ -47,6 +47,7 @@ class AliTypeSpec:
 class RegionProvisionPlan:
     region_name: str
     instance_type: str
+    instance_type_candidates: List[str]
     nodes_per_host: int
     hosts_needed: int
     zone_id: str
@@ -260,6 +261,8 @@ def build_region_plan(
     preferred = preferred_zones(region_cfg)
     subnet_map = zone_subnet_map(region_cfg)
 
+    instance_type_candidates = [spec.name for spec in type_specs]
+
     for spec in type_specs:
         # Check which zones report stock for this instance type.
         zones = zones_with_stock(region_client, region_name, spec.name, preferred)
@@ -275,6 +278,7 @@ def build_region_plan(
         return RegionProvisionPlan(
             region_name=region_name,
             instance_type=spec.name,
+            instance_type_candidates=instance_type_candidates,
             nodes_per_host=spec.nodes_per_host,
             hosts_needed=hosts_needed,
             zone_id=zone_id,
@@ -445,7 +449,13 @@ def provision_region_batch(
     # Create all required hosts in a single RunInstances request by
     # passing `amount=plan.hosts_needed`. This results in one batch API
     # call per region/zone and avoids creating instances one-by-one.
-    instance_ids = create_instance(region_client, cfg, disk_size=100, amount=plan.hosts_needed)
+    instance_ids = create_instance(
+        region_client,
+        cfg,
+        disk_size=100,
+        amount=plan.hosts_needed,
+        instance_types=plan.instance_type_candidates,
+    )
     region_hosts: List[HostSpec] = []
     failed_iids: List[str] = []
     max_workers = min(32, max(1, len(instance_ids)))
