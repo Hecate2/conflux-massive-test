@@ -66,7 +66,7 @@ def _launch_node(ip_address: str, index: int, counter: AtomicCounter) -> RemoteN
         logger.info(f"实例 {ip_address} 节点 {index} 无法建立连接")
         return None
 
-    node = RemoteNode(host_spec=ip_address, index=index)
+    node = RemoteNode(host=ip_address, index=index)
     if not node.wait_for_ready():
         logger.info(f"实例 {ip_address} 节点 {index} 无法进入就绪状态")
         return None
@@ -120,15 +120,17 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
-            shell_cmds.scp(str(script_local), node.host_spec, "root", remote_script)
-            shell_cmds.ssh(node.host_spec, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
-            shell_cmds.ssh(node.host_spec, "root", ["rm", "-f", remote_script])
+            shell_cmds.scp(str(script_local), node.host, "root", remote_script)
+            shell_cmds.ssh(node.host, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host, "root", ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
-            shell_cmds.scp_download(
-                f"./output{node.index}/",
-                f"./{local_path}/{node.id}/",
-                node.host_spec,
+            local_node_path = str(Path(local_path) / node.id)
+            Path(local_node_path).mkdir(parents=True, exist_ok=True)
+            shell_cmds.rsync_download(
+                f"/root/output{node.index}/",
+                local_node_path,
+                node.host,
                 user="root",
             )
             cnt2 = counter2.increment()
