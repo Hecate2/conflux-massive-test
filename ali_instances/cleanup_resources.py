@@ -85,7 +85,8 @@ def cleanup_all_regions(
         region_pairs: set[tuple[str, Optional[str]]] = set()
 
         try:
-            # Delete instances by tags
+            to_delete: List[str] = []
+            # Collect instances by tags
             for inst in _iter_instances(c, region_id):
                 tags = inst.tags.tag if inst.tags else []
                 # record instances that have the common tag (regardless of user tag value)
@@ -97,12 +98,24 @@ def cleanup_all_regions(
                     continue
                 if not inst.instance_id:
                     continue
-                try:
-                    delete_instance(c, region_id, inst.instance_id)
-                    region_deleted += 1
-                    logger.info(f"deleted instance {inst.instance_id} in {region_id}")
-                except Exception as exc:
-                    logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
+                to_delete.append(inst.instance_id)
+
+            if to_delete:
+                with ThreadPoolExecutor(max_workers=16) as del_executor:
+                    future_to_iid = {
+                        del_executor.submit(
+                            c.delete_instance,
+                            ecs_models.DeleteInstanceRequest(instance_id=iid, force=True, force_stop=True)):
+                            iid for iid in to_delete
+                    }
+                    for fut in as_completed(future_to_iid):
+                        iid = future_to_iid[fut]
+                        try:
+                            fut.result()
+                            region_deleted += 1
+                            logger.info(f"deleted instance {iid} in {region_id}")
+                        except Exception as exc:
+                            logger.warning(f"failed to delete instance {iid}: {exc}")
         except Exception as exc:
             logger.warning(f"failed to list/delete instances in {region_id}: {exc}")
 
@@ -209,12 +222,18 @@ def cleanup_from_json(
     for region_id, instance_ids in by_region.items():
         logger.info(f"cleanup instances in region {region_id}")
         c = client(cfg.credentials, region_id, cfg.endpoint)
-        for iid in instance_ids:
-            try:
-                delete_instance(c, region_id, iid)
-                logger.info(f"deleted instance {iid} in {region_id}")
-            except Exception as exc:
-                logger.warning(f"failed to delete instance {iid}: {exc}")
+        if not instance_ids:
+            continue
+        max_delete_workers = min(16, max(1, len(instance_ids)))
+        with ThreadPoolExecutor(max_workers=max_delete_workers) as del_executor:
+            future_to_iid = {del_executor.submit(delete_instance, c, region_id, iid): iid for iid in instance_ids}
+            for fut in as_completed(future_to_iid):
+                iid = future_to_iid[fut]
+                try:
+                    fut.result()
+                    logger.info(f"deleted instance {iid} in {region_id}")
+                except Exception as exc:
+                    logger.warning(f"failed to delete instance {iid}: {exc}")
 
 
 if __name__ == "__main__":
