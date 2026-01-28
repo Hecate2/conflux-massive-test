@@ -68,7 +68,7 @@ class NetworkConnector:
         executor.shutdown(wait=True)
 
         if len(failed_nodes) > 0:
-            logger.warning(f"{len(failed_nodes)}个节点建立连接失败")
+            raise Exception("部分节点建立连接失败")
 
     def _submit_connection_tasks(
         self,
