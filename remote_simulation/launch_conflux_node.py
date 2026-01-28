@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+
+from ali_instances.host_spec import HostSpec
 from . import docker_cmds
 from .remote_node import RemoteNode
 from utils import shell_cmds
@@ -27,18 +29,19 @@ class InstanceExecutionContext:
     counter: AtomicCounter
     config_file: TempFile
     pull_docker_image: bool
-    nodes_per_host: int
 
 
-def launch_remote_nodes(ips: List[str], nodes_per_host: int, config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:
+def launch_remote_nodes(host_specs: List[HostSpec], config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:
     logger.info("开始启动所有 Conflux 节点")
 
     counter = AtomicCounter()
-    context = InstanceExecutionContext(counter=counter, config_file=config_file, pull_docker_image=pull_docker_image, nodes_per_host=nodes_per_host)
+    context = InstanceExecutionContext(counter=counter, config_file=config_file, pull_docker_image=pull_docker_image)
 
-    launch_instance_future = HOST_CONNECT_POOL.map(lambda ip: _execute_instance(ip, "ubuntu", context), ips)
+    launch_instance_future = HOST_CONNECT_POOL.map(lambda spec: _execute_instance(spec, context), host_specs)
 
-    expected_nodes_cnt = len(ips) * nodes_per_host
+    # expected_nodes_cnt = len(ips) * nodes_per_host
+    expected_nodes_cnt = sum([s.nodes_per_host for s in host_specs])
+
 
     nodes = list(chain.from_iterable(launch_instance_future))
 
@@ -49,7 +52,7 @@ def launch_remote_nodes(ips: List[str], nodes_per_host: int, config_file: TempFi
     return nodes
 
 
-def stop_remote_nodes(ips: List[str]):
+def stop_remote_nodes(host_specs: List[HostSpec]):
     def _stop_instance(ip_address: str, user: str):
         try:
             shell_cmds.ssh(ip_address, user, docker_cmds.stop_all_nodes())
@@ -59,10 +62,10 @@ def stop_remote_nodes(ips: List[str]):
             logger.warning(f"停止实例 {ip_address} 上节点遇到问题: {e}")
             return 1
 
-    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda ip: _stop_instance(ip, "ubuntu"), ips))
+    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda spec: _stop_instance(spec.ip, spec.ssh_user), host_specs))
 
 
-def destory_remote_nodes(ips: List[str]):
+def destory_remote_nodes(host_specs: List[HostSpec]):
     def _stop_instance(ip_address: str, user: str):
         try:
             shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
@@ -72,15 +75,23 @@ def destory_remote_nodes(ips: List[str]):
             logger.warning(f"停止实例 {ip_address} 上节点遇到问题: {e}")
             return 1
 
-    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda ip: _stop_instance(ip, "ubuntu"), ips))
+    fail_cnt = sum(HOST_CONNECT_POOL.map(lambda spec: _stop_instance(spec.ip, spec.ssh_user), host_specs))
 
     
 
 
-def _execute_instance(ip_address: str, user: str, ctx: InstanceExecutionContext) -> List[RemoteNode]:
+def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> List[RemoteNode]:
     # 返回失败节点数量
     try:
+        ip_address = host_spec.ip
+        user = host_spec.ssh_user
+
+        shell_cmds.scp("./setup_image.sh", ip_address, user, "~/setup_image.sh")
+        logger.debug(f"实例 {ip_address} 上传初始化脚本完成")
+        shell_cmds.ssh(ip_address, user, "./setup_image.sh")
+        logger.debug(f"实例 {ip_address} 初始化完成")
         shell_cmds.scp(ctx.config_file.path, ip_address, user, "~/config.toml")
+
         logger.debug(f"实例 {ip_address} 同步配置完成")
         if ctx.pull_docker_image:
             shell_cmds.ssh(ip_address, user, docker_cmds.pull_image())
@@ -93,12 +104,15 @@ def _execute_instance(ip_address: str, user: str, ctx: InstanceExecutionContext)
         logger.warning(f"无法初始化实例 {ip_address}: {e}")
         return list()
     
-    launch_nodes_future = NODE_CONNECT_POOL.map(lambda index: _launch_node(ip_address, user, index, ctx.counter), range(ctx.nodes_per_host))
+    launch_nodes_future = NODE_CONNECT_POOL.map(lambda index: _launch_node(host_spec, index, ctx.counter), range(host_spec.nodes_per_host))
     return [n for n in launch_nodes_future if n is not None]
 
 
 
-def _launch_node(ip_address: str, user: str, index: int, counter: AtomicCounter):
+def _launch_node(host_spec: HostSpec, index: int, counter: AtomicCounter):
+    ip_address = host_spec.ip
+    user = host_spec.ssh_user
+
     try:
         shell_cmds.ssh(ip_address, user, docker_cmds.launch_node(index))
     except Exception as e:
@@ -111,7 +125,7 @@ def _launch_node(ip_address: str, user: str, index: int, counter: AtomicCounter)
         logger.info(f"实例 {ip_address} 节点 {index} 无法建立连接")
         return None
 
-    node = RemoteNode(host=ip_address, index=index)
+    node = RemoteNode(host_spec=host_spec, index=index)
 
     if not node.wait_for_ready():
         logger.info(f"实例 {ip_address} 节点 {index} 无法进入就绪状态")

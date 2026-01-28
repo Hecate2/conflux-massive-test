@@ -76,9 +76,9 @@ class Instances:
                     'Ebs': {
                         'VolumeSize': config.volume_size,
                         'VolumeType': 'gp3',
-                        'Iops': 16000,
+                        'Iops': 3000,
                         # 4. gp3 单卷吞吐量最大值 (MiB/s)
-                        'Throughput': 1000,
+                        'Throughput': 300,
                         # 5. 随实例终止删除，避免残留扣费
                         'DeleteOnTermination': True
                     },
@@ -293,9 +293,10 @@ def arg_parser():
     
     # create subcommand
     create = subparsers.add_parser("create", help="Create instances", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    create.add_argument("-f", "--dump-file", default="instances.pkl", help="Path to the instance file")
+    create.add_argument("-f", "--dump-file", default="aws_servers.json", help="Path to the instance file")
     create.add_argument("-n", "--instance-count", default=3, type=int, help="Number of instances")
     create.add_argument("-t", "--instance-type", default="m6i.2xlarge", help="Instance Type")
+    create.add_argument("-w", "--instance-weight", default=1, type=int, help="Instance Weight")
     
     # destroy subcommand
     destroy = subparsers.add_parser("destroy", help="Destroy instances", formatter_class=argparse.ArgumentDefaultsHelpFormatter)

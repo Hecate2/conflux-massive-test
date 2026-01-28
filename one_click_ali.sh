@@ -19,9 +19,11 @@ print_separator() {
 cleanup() {
     # 临时关闭 'set -e'，防止销毁过程中的小错误阻断日志打印
     set +e
-    print_separator "正在执行清理操作: 销毁 EC2 实例..."
-    $PYTHON -m aws_instances.launch_ec2_instances destroy
-    # echo "跳过销毁实例"
+    
+    # print_separator "正在执行清理操作: 销毁 EC2 实例..."
+    # $PYTHON -m ali_instances.cleanup_resources --instances-json ali_servers.json
+    
+    print_separator "跳过销毁实例"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 脚本执行结束。"
 }
 
@@ -29,8 +31,8 @@ cleanup() {
 trap cleanup EXIT
 
 # --- 步骤 1: 创建实例 ---
-print_separator "步骤 1/2: 创建 EC2 实例..."
-$PYTHON -m aws_instances.launch_ec2_instances create -n 100 -t m6i.2xlarge
+print_separator "步骤 1/2: 创建 Aliyun 实例..."
+$PYTHON -m ali_instances.create_servers
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/2: 开始远程模拟..."

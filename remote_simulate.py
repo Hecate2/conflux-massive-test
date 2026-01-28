@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
+import argparse
+import json
 import pickle
+import shutil
+import sys
 from typing import List
+
+from dotenv import load_dotenv
+
+from ali_instances.create_servers import load_host_specs
+from ali_instances.host_spec import HostSpec
 
 from remote_simulation.block_generator import generate_blocks_async
 from remote_simulation.launch_conflux_node import launch_remote_nodes
@@ -21,6 +30,11 @@ from pathlib import Path
 
 from utils.wait_until import WaitUntilTimeoutError
 
+def load_launched_hosts(path: str)->List[HostSpec]:
+    raw = json.load(open(path, "r"))
+    hosts = load_host_specs(raw)
+    return hosts
+
 def generate_timestamp():
     """
     生成当前时间戳，格式为 YYYYMMDDHHMMSS
@@ -31,50 +45,79 @@ def generate_timestamp():
     timestamp = now.strftime("%Y%m%d%H%M%S")
     return timestamp
 
+def make_parser():
+    parser = argparse.ArgumentParser(description="运行区块链节点模拟")
+    parser.add_argument(
+        "-s", "--host-spec",
+        type=str,
+        default=f"./ali_servers.json",
+        help="启动日志的路径"
+    )
+    parser.add_argument(
+        "-l", "--log-path",
+        type=str,
+        default=f"logs/{generate_timestamp()}",
+        help="日志存储路径 (默认: logs/YYYYMMDDHHMMSS)"
+    )
+    return parser
+
 
 if __name__ == "__main__":
-    # 1. 启动远程服务器
-    # 为了快速实验，从 pickle 文件中读取已经创建好的服务器
+    load_dotenv()
 
-    with open("instances.pkl", "rb") as file:
-        instances: Instances = pickle.load(file)
+    parser = make_parser()
+    args = parser.parse_args()
+    log_path = args.log_path
+
+    Path(log_path).mkdir(parents=True, exist_ok=True)
+    logger.add(f"{log_path}/remote_simulate.log", encoding="utf-8")
     
-    logger.info(f"实例列表集合 {instances.ip_addresses}")
-    ip_addresses: List[str] = instances.ip_addresses # pyright: ignore[reportAssignmentType]
+    # 1. 启动远程服务器
+    # 从配置文件中读取已经启动好的服务器
+
+    host_specs = load_launched_hosts(args.host_spec)
+
+    # with open("instances.pkl", "rb") as file:
+    #     instances: Instances = pickle.load(file)
+    
+    
+    logger.info(f"实例列表集合 {[s.ip for s in host_specs]}")
+    # ip_addresses: List[str] = instances.ip_addresses # pyright: ignore[reportAssignmentType]
 
     # 2. 生成配置
-    nodes_per_host = 1
+    num_target_nodes = sum([s.nodes_per_host for s in host_specs])
+    connect_peers = min(7, num_target_nodes - 1)
 
-    simulation_config = SimulateOptions(target_nodes=len(ip_addresses) * nodes_per_host, nodes_per_host=nodes_per_host, num_blocks=1000, connect_peers=8, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
-    assert simulation_config.target_nodes == simulation_config.nodes_per_host * len(ip_addresses)
+    simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=7, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
     node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 500) # send_tx_period_ms=200,
     assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
 
     logger.success(f"完成配置文件 {config_file.path}")
+    shutil.copy(config_file.path, f"{log_path}/config.toml")
 
     log_path = f"logs/{generate_timestamp()}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     # 3. 启动节点
-    nodes = launch_remote_nodes(ip_addresses, simulation_config.nodes_per_host, config_file, pull_docker_image=True)
+    nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=True)
     if len(nodes) < simulation_config.target_nodes:
         raise Exception("Not all nodes started")
     logger.success("所有节点已启动，准备连接拓扑网络")
 
     # 4. 手动连接网络
-    topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers)
+    topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers, latency_max = 0)
     for k, v in topology.peers.items():
         logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {", ".join([str(i) for i in v])}")
-    connect_nodes(nodes, topology, min_peers=7)
+    connect_nodes(nodes, topology, min_peers=simulation_config.connect_peers - 1)
     logger.success("拓扑网络构建完毕")
     wait_for_nodes_synced(nodes)
 
     # 5. 开始运行实验
     init_tx_gen(nodes, node_config.txgen_account_count)
     logger.success("开始运行区块链系统")
-    generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms)
+    generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
     logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
     try:
         wait_for_nodes_synced(nodes)
@@ -87,6 +130,8 @@ if __name__ == "__main__":
     
     collect_logs(nodes, log_path)
     logger.success(f"日志收集完毕，路径 {os.path.abspath(log_path)}")
+
+    shutil.copy(args.host_spec, f"{log_path}/servers.json")
 
     # stop_remote_nodes(ip_addresses)
     # destory_remote_nodes(ip_addresses)

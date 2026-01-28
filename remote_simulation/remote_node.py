@@ -7,6 +7,7 @@ from typing import Any, Callable, List, Optional, Tuple, TypeVar
 import eth_utils
 from loguru import logger
 
+from ali_instances.host_spec import HostSpec
 from conflux.utils import convert_to_nodeid, encode_int32, int_to_bytes, sha3
 
 from jsonrpcclient.clients.http_client import HTTPClient
@@ -18,29 +19,29 @@ from remote_simulation.port_allocation import p2p_port, remote_rpc_port
 
 @dataclass
 class RemoteNode:
-    host: str
+    host_spec: HostSpec
     index: int
     key: str = None
 
     def __hash__(self):
         # 返回基于不可变属性的哈希值
-        return hash((self.host, self.index))
+        return hash((self.host_spec.ip, self.index))
     
 
     @property
     def rpc(self) -> 'RemoteNodeRPC':
         port = remote_rpc_port(self.index)
-        client = HTTPClient(f"http://{self.host}:{port}")
-        return RemoteNodeRPC(host=self.host, port = port, client=client)
+        client = HTTPClient(f"http://{self.host_spec.ip}:{port}")
+        return RemoteNodeRPC(host=self.host_spec.ip, port = port, client=client)
     
     @property
     def id(self) -> str:
-        return f"{self.host}-{self.index}"
+        return f"{self.host_spec.ip}-{self.index}"
     
     @property
     def p2p_addr(self) -> str:
         port = p2p_port(self.index)
-        return f"{self.host}:{port}"
+        return f"{self.host_spec.ip}:{port}"
     
     def wait_for_ready(self):
         try:
@@ -67,7 +68,7 @@ class RemoteNode:
         addr_tmp[0] &= 0x0f
         addr_tmp[0] |= 0x10
         self.addr = addr_tmp
-        logger.debug(f"Get nodeid {self.key} for instance {self.host} node {self.index}")
+        logger.debug(f"Get nodeid {self.key} for instance {self.host_spec.ip} node {self.index}")
 
     def _get_node_id(self):
         challenge = random.randint(0, 2**32-1)

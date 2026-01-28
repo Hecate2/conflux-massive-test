@@ -56,6 +56,7 @@ def cleanup_all_regions(
     user_tag: str = DEFAULT_USER_TAG_VALUE,
     user_tag_key: str = DEFAULT_USER_TAG_KEY,
     name_prefix: Optional[str] = None,
+    delete_network: bool = False,
 ) -> None:
     cfg = EcsConfig(credentials=credentials or EcsConfig().credentials)
     if regions is None:
@@ -64,22 +65,43 @@ def cleanup_all_regions(
     tag_filter = TagFilter(common_key=common_tag, common_value=common_tag_value, user_key=user_tag_key, user_value=user_tag)
     prefix = name_prefix or f"{common_tag}-{user_tag}"
 
+    total_deleted = 0
+    observed_user_pairs: set[tuple[str, Optional[str]]] = set()
+    regions = [
+        "ap-southeast-5",  # Indonesia
+        "ap-southeast-3",  # Malaysia
+        "ap-southeast-6",  # Philippines
+        "ap-southeast-7",  # Thailand
+        "ap-northeast-2",  # Korea
+        "ap-southeast-1",  # Singapore
+        "me-east-1",  
+    ]
+
     for region_id in regions:
         logger.info(f"cleanup region {region_id}")
         c = client(cfg.credentials, region_id, cfg.endpoint)
 
-        # Delete instances by tags
-        for inst in _iter_instances(c, region_id):
-            tags = inst.tags.tag if inst.tags else []
-            if not tag_filter.matches(tags):
-                continue
-            if not inst.instance_id:
-                continue
-            try:
-                delete_instance(c, region_id, inst.instance_id)
-                logger.info(f"deleted instance {inst.instance_id} in {region_id}")
-            except Exception as exc:
-                logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
+        try:
+            # Delete instances by tags
+            for inst in _iter_instances(c, region_id):
+                tags = inst.tags.tag if inst.tags else []
+                # record instances that have the common tag (regardless of user tag value)
+                tag_map = {t.tag_key: t.tag_value for t in tags if t.tag_key}
+                if tag_map.get(tag_filter.common_key) == tag_filter.common_value:
+                    observed_user_pairs.add((user_tag_key, tag_map.get(user_tag_key)))
+
+                if not tag_filter.matches(tags):
+                    continue
+                if not inst.instance_id:
+                    continue
+                try:
+                    delete_instance(c, region_id, inst.instance_id)
+                    total_deleted += 1
+                    logger.info(f"deleted instance {inst.instance_id} in {region_id}")
+                except Exception as exc:
+                    logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
+        except Exception as exc:
+            logger.warning(f"failed to list/delete instances in {region_id}: {exc}")
 
         # Best-effort cleanup of security groups with the same prefix
         try:
@@ -102,6 +124,8 @@ def cleanup_all_regions(
         except Exception as exc:
             logger.warning(f"failed to list/delete security groups in {region_id}: {exc}")
 
+        if not delete_network:
+            continue
         # Best-effort cleanup of vpcs/vswitches with the same prefix
         # try-catch is needed
         try:
@@ -134,7 +158,16 @@ def cleanup_all_regions(
                     logger.warning(f"failed to delete vpc {vpc.vpc_id}: {exc}")
         except Exception as exc:
             logger.warning(f"failed to list/delete vpcs in {region_id}: {exc}")
-
+    # If we deleted nothing, print observed user tag values for instances that had the common tag
+    if total_deleted == 0:
+        if observed_user_pairs:
+            pairs = ", ".join(f"{k}={v if v is not None else '<missing>'}" for k, v in sorted(observed_user_pairs))
+            logger.warning(
+                f"No instances deleted for filter user_tag_key={user_tag_key}, user_tag_value={user_tag}. "
+                f"However, the following user tag(s) were observed on resources with {common_tag}={common_tag_value}: {pairs}"
+            )
+        else:
+            logger.warning(f"No instances found with {common_tag}={common_tag_value} in the queried regions.")
 
 def cleanup_from_json(
     json_path: Path,
@@ -173,6 +206,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--instances-json",
         help="Path to ali_servers.json to cleanup only listed instances",
+    )
+    parser.add_argument(
+        "--delete-network",
+        action="store_true",
+        help="Also delete VPC/VSwitch resources with the matching prefix",
     )
     args = parser.parse_args()
 

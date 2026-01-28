@@ -623,6 +623,8 @@ class LogAggregator:
 
             if tx.ready_pool_timestamps[0] is not None:
                 self.min_tx_to_ready_pool_latency.append(tx.get_min_tx_to_ready_pool_latency())
+            # else:
+            #     print(tx.__dict__)
 
     def get_largest_min_tx_packed_latency_hash(self):
         return self.largest_min_tx_packed_latency_hash

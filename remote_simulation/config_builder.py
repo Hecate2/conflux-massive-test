@@ -12,7 +12,6 @@ class SimulateOptions:
     """Simulation environment configuration."""
     target_tps: int = 1000
     target_nodes: int = 100
-    nodes_per_host: int = 3
 
     bandwidth: int = 20  # Bandwidth in Mbit/s
     connect_peers: int = 3
@@ -85,10 +84,8 @@ def _normalize_config_value(v: Any) -> str:
     
 
 def _generate_config_dict(simulation_config: SimulateOptions, node_config: ConfluxOptions) -> Dict[str, str]:
-    # num_nodes is set to nodes_per_host because setup_chain() generates configs
     # for each node on the same host with different port number.
 
-    # self.num_nodes = self.options.nodes_per_host
     # self.enable_tx_propagation = self.options.enable_tx_propagation
     # self.ips = []
 

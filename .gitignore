@@ -1,4 +1,5 @@
 *.pem
+keys/*
 /ref
 
 ali_servers.json

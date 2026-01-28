@@ -1,13 +1,15 @@
 """Instance preparation and lifecycle helpers for Aliyun ECS."""
 import asyncio
+import copy
 import ipaddress
 import json
 import socket
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
@@ -15,7 +17,7 @@ from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
-from .config import EcsConfig, client
+from .config import EcsConfig, client, RUN_INSTANCES_MAX_AMOUNT
 
 
 async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int = 3) -> None:
@@ -124,11 +126,13 @@ def pick_zone(c: EcsClient, r: str) -> str:
     return zones[0].zone_id
 
 
-def ensure_vpc(c: EcsClient, r: str, name: str, cidr: str) -> str:
+def ensure_vpc(c: EcsClient, r: str, name: str, cidr: str, allow_create: bool = True) -> str:
     resp = c.describe_vpcs(ecs_models.DescribeVpcsRequest(region_id=r, page_size=50))
     for v in resp.body.vpcs.vpc or []:
         if v.vpc_name == name:
             return v.vpc_id
+    if not allow_create:
+        raise RuntimeError(f"vpc {name} not found in {r}")
     cr = c.create_vpc(ecs_models.CreateVpcRequest(region_id=r, vpc_name=name, cidr_block=cidr))
     vid = cr.body.vpc_id
     wait_until(lambda: _vpc_available(c, r, vid), timeout=120, retry_interval=3)
@@ -141,12 +145,23 @@ def _vpc_available(c: EcsClient, r: str, vid: str) -> bool:
     return vpcs and vpcs[0].status == "Available"
 
 
-def ensure_vswitch(c: EcsClient, r: str, vpc: str, zone: str, name: str, cidr: str, vpc_cidr: str) -> str:
+def ensure_vswitch(
+    c: EcsClient,
+    r: str,
+    vpc: str,
+    zone: str,
+    name: str,
+    cidr: str,
+    vpc_cidr: str,
+    allow_create: bool = True,
+) -> str:
     resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, vpc_id=vpc, page_size=50))
     vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
     for v in vsws:
         if v.v_switch_name == name and v.zone_id == zone:
             return v.v_switch_id
+    if not allow_create:
+        raise RuntimeError(f"vswitch {name} not found in {r}/{zone}")
     existing = [v.cidr_block for v in vsws if v.cidr_block]
     net = ipaddress.ip_network(cidr)
     if any(net.overlaps(ipaddress.ip_network(e)) for e in existing if e):
@@ -167,11 +182,21 @@ def _vswitch_ok(c: EcsClient, r: str, vsid: str) -> bool:
     return vsws and vsws[0].status == "Available"
 
 
-def ensure_sg(c: EcsClient, r: str, vpc: str, name: str) -> str:
+def _vswitch_zone(c: EcsClient, r: str, vsid: str) -> Optional[str]:
+    resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=vsid))
+    vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
+    if not vsws:
+        return None
+    return vsws[0].zone_id
+
+
+def ensure_sg(c: EcsClient, r: str, vpc: str, name: str, allow_create: bool = True) -> str:
     resp = c.describe_security_groups(ecs_models.DescribeSecurityGroupsRequest(region_id=r, vpc_id=vpc, page_size=50))
     for g in resp.body.security_groups.security_group or []:
         if g.security_group_name == name:
             return g.security_group_id
+    if not allow_create:
+        raise RuntimeError(f"security group {name} not found in {r}")
     return c.create_security_group(
         ecs_models.CreateSecurityGroupRequest(region_id=r, vpc_id=vpc, security_group_name=name, description="conflux")
     ).body.security_group_id
@@ -193,13 +218,66 @@ def auth_port(c: EcsClient, r: str, sg: str, port: int) -> None:
     )
 
 
-def ensure_net(c: EcsClient, cfg: EcsConfig, ports: Sequence[int] = ()) -> None:
+def ensure_vpc_and_vswitch(
+    c: EcsClient,
+    cfg: EcsConfig,
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+) -> tuple[str, str]:
     cfg.zone_id = cfg.zone_id or pick_zone(c, cfg.region_id)
-    vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr)
-    cfg.v_switch_id = cfg.v_switch_id or ensure_vswitch(
-        c, cfg.region_id, vpc, cfg.zone_id, cfg.vswitch_name, cfg.vswitch_cidr, cfg.vpc_cidr
+    vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr, allow_create=allow_create_vpc)
+    if cfg.v_switch_id:
+        vs_zone = _vswitch_zone(c, cfg.region_id, cfg.v_switch_id)
+        if not vs_zone:
+            if not allow_create_vswitch:
+                raise RuntimeError(f"vswitch {cfg.v_switch_id} not found in {cfg.region_id}")
+            logger.warning(f"vswitch {cfg.v_switch_id} missing; will create a new vswitch in {cfg.zone_id}")
+            cfg.v_switch_id = None
+        elif vs_zone != cfg.zone_id:
+            msg = (
+                f"vswitch {cfg.v_switch_id} is in zone {vs_zone}, "
+                f"but target zone is {cfg.zone_id}"
+            )
+            if not allow_create_vswitch:
+                raise RuntimeError(msg)
+            logger.warning(f"{msg}; will create a new vswitch in {cfg.zone_id}")
+            cfg.v_switch_id = None
+
+    if not cfg.v_switch_id:
+        cfg.v_switch_id = ensure_vswitch(
+            c,
+            cfg.region_id,
+            vpc,
+            cfg.zone_id,
+            cfg.vswitch_name,
+            cfg.vswitch_cidr,
+            cfg.vpc_cidr,
+            allow_create=allow_create_vswitch,
+        )
+    return vpc, cfg.v_switch_id
+
+
+def ensure_net(
+    c: EcsClient,
+    cfg: EcsConfig,
+    ports: Sequence[int] = (),
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+    allow_create_sg: bool = True,
+) -> None:
+    vpc, _ = ensure_vpc_and_vswitch(
+        c,
+        cfg,
+        allow_create_vpc=allow_create_vpc,
+        allow_create_vswitch=allow_create_vswitch,
     )
-    cfg.security_group_id = cfg.security_group_id or ensure_sg(c, cfg.region_id, vpc, cfg.security_group_name)
+    cfg.security_group_id = cfg.security_group_id or ensure_sg(
+        c,
+        cfg.region_id,
+        vpc,
+        cfg.security_group_name,
+        allow_create=allow_create_sg,
+    )
     tags = _tag_dict(cfg)
     try:
         if cfg.security_group_id:
@@ -286,6 +364,72 @@ def _disk_category(c: EcsClient, r: str, zone: str) -> Optional[str]:
     return None
 
 
+def _history_event_failed(event: object) -> bool:
+    status = (getattr(event, "event_cycle_status", "") or "").lower()
+    if status == "failed":
+        return True
+    name = (getattr(event, "event_name", "") or "").lower()
+    etype = (getattr(event, "event_type", "") or "").lower()
+    return any(keyword in name for keyword in ("fail", "error")) or any(keyword in etype for keyword in ("fail", "error"))
+
+
+def _instances_failed_by_history(c: EcsClient, r: str, instance_ids: Sequence[str]) -> set[str]:
+    failed: set[str] = set()
+    for iid in instance_ids:
+        try:
+            resp = c.describe_instance_history_events(
+                ecs_models.DescribeInstanceHistoryEventsRequest(region_id=r, instance_id=iid)
+            )
+            events = []
+            if resp.body and getattr(resp.body, "instance_system_event_set", None):
+                events = getattr(resp.body.instance_system_event_set, "instance_system_event", None) or []
+            if any(_history_event_failed(e) for e in events or []):
+                failed.add(iid)
+        except Exception as exc:
+            logger.warning(f"failed to query instance history events for {iid}: {exc}")
+    return failed
+
+
+def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: int, allow_partial_success: bool = False) -> list[str]:
+    dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
+    disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
+    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
+    tags = [ecs_models.RunInstancesRequestTag(key=k, value=v) for k, v in _tag_dict(cfg).items()]
+    req = ecs_models.RunInstancesRequest(
+        region_id=cfg.region_id,
+        zone_id=cfg.zone_id,
+        image_id=cfg.image_id or cfg.base_image_id,
+        instance_type=cfg.instance_type,
+        security_group_id=cfg.security_group_id,
+        v_switch_id=cfg.v_switch_id,
+        key_pair_name=cfg.key_pair_name,
+        instance_name=name,
+        internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
+        internet_charge_type="PayByTraffic",
+        instance_charge_type="PostPaid",
+        tag=tags,
+        amount=amount,
+    )
+    if allow_partial_success:
+        req.min_amount = 1
+    if cfg.use_spot:
+        req.spot_strategy = cfg.spot_strategy
+    if disk:
+        req.system_disk = disk
+    try:
+        resp = c.run_instances(req)
+        ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
+        return list(ids or [])
+    except Exception as exc:
+        e = traceback.format_exc()
+        if "OperationDenied.NoStock" in e:
+            logger.error(f"run_instances got no stock for {cfg.region_id}/{cfg.zone_id}: {exc}")
+            return []
+        logger.error(f"run_instances failed for {cfg.region_id}/{cfg.zone_id}: {exc}")
+        logger.error(e)
+        return []
+
+
 def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: int = 1) -> list[str]:
     if not cfg.instance_type:
         raise ValueError("instance_type required")
@@ -299,40 +443,81 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
     if not cfg.v_switch_id:
         raise ValueError("v_switch_id required")
 
-    dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
-    disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
-    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
-    tags = [ecs_models.RunInstancesRequestTag(key=k, value=v) for k, v in _tag_dict(cfg).items()]
-    req = ecs_models.RunInstancesRequest(
-        region_id=cfg.region_id,
-        zone_id=cfg.zone_id,
-        image_id=img,
-        instance_type=cfg.instance_type,
-        security_group_id=cfg.security_group_id,
-        v_switch_id=cfg.v_switch_id,
-        key_pair_name=cfg.key_pair_name,
-        instance_name=name,
-        internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
-        internet_charge_type="PayByTraffic",
-        instance_charge_type="PostPaid",
-        tag=tags,
-        amount=amount,
-    )
-    if cfg.use_spot:
-        req.spot_strategy = cfg.spot_strategy
-    if disk:
-        req.system_disk = disk
-    resp = c.run_instances(req)
-    ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
-    if not ids:
-        raise RuntimeError("instance creation failed")
-    return ids
+    zones = list_zones_for_instance_type(c, cfg.region_id, cfg.instance_type)
+    zone_candidates = [cfg.zone_id] + [z for z in zones if z != cfg.zone_id]
 
+    remaining = amount
+    region_instance_ids: list[str] = []
 
-def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str) -> None:
+    # 尝试在相同 zone 开所有节点
+    if amount <= RUN_INSTANCES_MAX_AMOUNT:
+        for zone_id in zone_candidates:
+            if remaining <= 0:
+                break
+
+            zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+            
+            region_instance_ids.extend(zone_instance_ids)
+            remaining = amount - len(region_instance_ids)
+
+    # 尝试在不同 zone 开节点
+    for zone_id in zone_candidates:
+        if remaining <= 0:
+            break
+
+        zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+        
+        region_instance_ids.extend(zone_instance_ids)
+        remaining = amount - len(region_instance_ids)
+
+    if remaining > 0:
+        logger.warning(
+            f"not enough instances provisioned in {cfg.region_id}; remaining required instances: {remaining}"
+        )
+
+    return region_instance_ids
+
+def _create_instance_in_zone(c: EcsClient, cfg: EcsConfig, zone_id: str, * , amount: int = 1, disk_size: int = 40, allow_partial_success: bool = False) -> List[str]:
+    default_zone_id = cfg.zone_id
+    
+    if zone_id != default_zone_id:
+        cfg.zone_id = zone_id
+        cfg.v_switch_id = None
+        try:
+            ensure_vpc_and_vswitch(c, cfg, allow_create_vpc=True, allow_create_vswitch=True)
+        except Exception as exc:
+            logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
+            return []
+
+    zone_instance_ids = []
+    
+    while len(zone_instance_ids) < amount:
+        target = min(amount - len(zone_instance_ids), RUN_INSTANCES_MAX_AMOUNT)
+        
+        ids = _run_instances_once(c, cfg, disk_size, amount=target, allow_partial_success = allow_partial_success)
+        
+        zone_instance_ids.extend(ids)
+        
+        if len(ids) < target:
+            break
+    
+    if not zone_instance_ids:
+        logger.warning(f"no instances returned for {cfg.region_id}/{zone_id}")
+        return []
+
+    failed = _instances_failed_by_history(c, cfg.region_id, ids)
+    if failed:
+        logger.warning(
+            f"{len(failed)} instances reported failure in {cfg.region_id}/{zone_id}: {sorted(failed)}"
+        )
+    return [iid for iid in ids if iid not in failed]
+
+def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str, allow_create: bool = True) -> None:
     resp = c.describe_key_pairs(ecs_models.DescribeKeyPairsRequest(region_id=r, key_pair_name=name))
     if resp.body.key_pairs.key_pair:
         return
+    if not allow_create:
+        raise RuntimeError(f"keypair {name} not found in {r}")
     kp = Path(key_path).expanduser().resolve()
     if not kp.exists():
         kp.parent.mkdir(parents=True, exist_ok=True)
@@ -352,39 +537,3 @@ class InstanceHandle:
     config: EcsConfig
     instance_id: str
     public_ip: str
-
-
-def _provision_instance(c: EcsClient, cfg: EcsConfig, ports: Sequence[int], disk_size: int) -> InstanceHandle:
-    ensure_net(c, cfg, ports)
-    iid = create_instance(c, cfg, disk_size=disk_size, amount=1)[0]
-    logger.info(f"instance: {iid}")
-    st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-    if st == "Stopped":
-        try:
-            start_instance(c, iid)
-        except Exception as exc:
-            logger.warning(f"start_instance failed for {iid}: {exc}. Will wait for instance to become Running.")
-    allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-    try:
-        wait_ssh_port(ip, 22, cfg.wait_timeout, cfg.poll_interval)
-        logger.info(f"ssh port ready: {ip}:22")
-    except TimeoutError as exc:
-        logger.warning(f"ssh port check timed out for {ip}: {exc}")
-    logger.info(f"instance ready: {ip}")
-    return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
-
-
-def provision_instance_with_type(
-    cfg: EcsConfig,
-    instance_type: str,
-    zone_id: Optional[str],
-    ports: Sequence[int],
-    v_switch_id: Optional[str] = None,
-) -> InstanceHandle:
-    c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
-    cfg.instance_type = instance_type
-    cfg.zone_id = zone_id or cfg.zone_id
-    if v_switch_id is not None:
-        cfg.v_switch_id = v_switch_id
-    return _provision_instance(c, cfg, ports=ports, disk_size=100)
