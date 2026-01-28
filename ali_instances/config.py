@@ -27,7 +27,7 @@ class AliCredentials:
 
 
 @dataclass
-class TypeConfig:
+class InstanceTypeConfig:
     name: str
     nodes: Optional[int] = None
 
@@ -46,7 +46,7 @@ class RegionConfig:
     base_image_name: Optional[str] = None
     security_group_id: Optional[str] = None
     zones: List[ZoneConfig] = field(default_factory=list)
-    type: Optional[List[TypeConfig]] = None
+    type: Optional[List[InstanceTypeConfig]] = None
 
 
 @dataclass
@@ -54,7 +54,7 @@ class AccountConfig:
     access_key_id: str = ""
     access_key_secret: str = ""
     user_tag: Optional[str] = None
-    type: Optional[List[TypeConfig]] = None
+    type: Optional[List[InstanceTypeConfig]] = None
     regions: List[RegionConfig] = field(default_factory=list)
     image: Optional[str] = None
     base_image_name: Optional[str] = None
@@ -72,7 +72,7 @@ class EcsRuntimeConfig:
     region_id: str = DEFAULT_REGION
     zone_id: Optional[str] = None
     image_id: Optional[str] = None
-    instance_type: Optional[str] = None
+    instance_type: Optional[List[InstanceTypeConfig]] = None
     use_spot: bool = True
     spot_strategy: str = "SpotAsPriceGo"
     v_switch_id: Optional[str] = None

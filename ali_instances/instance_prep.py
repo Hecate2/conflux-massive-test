@@ -16,7 +16,7 @@ from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
-from .config import EcsRuntimeConfig, client, RUN_INSTANCES_MAX_AMOUNT
+from .config import EcsRuntimeConfig, InstanceTypeConfig, client, RUN_INSTANCES_MAX_AMOUNT
 
 DEFAULT_MIN_CPU_CORES = 4
 DEFAULT_MIN_MEMORY_GB = 8.0
@@ -375,7 +375,14 @@ def _instances_failed_by_history(c: EcsClient, r: str, instance_ids: Sequence[st
     return failed
 
 
-def _run_instances_once(c: EcsClient, cfg: EcsRuntimeConfig, disk_size: int, amount: int, allow_partial_success: bool = False) -> list[str]:
+def _run_instances_once(
+    c: EcsClient,
+    cfg: EcsRuntimeConfig,
+    instance_type: str,
+    disk_size: int,
+    amount: int,
+    allow_partial_success: bool = False,
+) -> list[str]:
     dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
     disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
@@ -384,7 +391,7 @@ def _run_instances_once(c: EcsClient, cfg: EcsRuntimeConfig, disk_size: int, amo
         region_id=cfg.region_id,
         zone_id=cfg.zone_id,
         image_id=cfg.image_id,
-        instance_type=cfg.instance_type,
+        instance_type=instance_type,
         security_group_id=cfg.security_group_id,
         v_switch_id=cfg.v_switch_id,
         key_pair_name=cfg.key_pair_name,
@@ -434,12 +441,13 @@ def create_instance(
     if not cfg.v_switch_id:
         raise ValueError("v_switch_id required")
 
-    types = [t for t in (instance_types or [cfg.instance_type]) if t]
+    configured_types = [t.name for t in (cfg.instance_type or [])]
+    types = [t for t in (instance_types or configured_types) if t]
     if not types:
         raise ValueError("instance_type required")
-    cfg.instance_type = cfg.instance_type or types[0]
+    selected_type = types[0]
 
-    zones = list_zones_for_instance_type(c, cfg.region_id, cfg.instance_type)
+    zones = list_zones_for_instance_type(c, cfg.region_id, selected_type)
     zone_candidates = [cfg.zone_id] + [z for z in zones if z != cfg.zone_id]
 
     remaining = amount
@@ -510,7 +518,8 @@ def _create_instance_in_zone(
             logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
             return []
 
-    types = [t for t in (instance_types or [cfg.instance_type]) if t]
+    configured_types = [t.name for t in (cfg.instance_type or [])]
+    types = [t for t in (instance_types or configured_types) if t]
     if not types:
         logger.warning(f"no instance types available for {cfg.region_id}/{zone_id}")
         return []
@@ -520,10 +529,16 @@ def _create_instance_in_zone(
     for instance_type in types:
         if len(zone_instance_ids) >= amount:
             break
-        cfg.instance_type = instance_type
         while len(zone_instance_ids) < amount:
             target = min(amount - len(zone_instance_ids), RUN_INSTANCES_MAX_AMOUNT)
-            ids = _run_instances_once(c, cfg, disk_size, amount=target, allow_partial_success=allow_partial_success)
+            ids = _run_instances_once(
+                c,
+                cfg,
+                instance_type,
+                disk_size,
+                amount=target,
+                allow_partial_success=allow_partial_success,
+            )
             zone_instance_ids.extend(ids)
             if len(ids) < target:
                 break

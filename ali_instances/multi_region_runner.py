@@ -19,7 +19,7 @@ from ali_instances.config import (
     AccountConfig,
     EcsRuntimeConfig,
     RegionConfig,
-    TypeConfig,
+    InstanceTypeConfig,
     ZoneConfig,
     client,
     DEFAULT_USER_TAG_VALUE,
@@ -87,7 +87,7 @@ def resolve_aliyun_types(
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> List[AliTypeSpec]:
-    types_cfg = region_cfg.type or account_cfg.type or [TypeConfig(name="ecs.g8i.xlarge")]
+    types_cfg = region_cfg.type or account_cfg.type or [InstanceTypeConfig(name="ecs.g8i.xlarge")]
     specs: List[AliTypeSpec] = []
     for item in types_cfg:
         name = item.name
@@ -116,10 +116,10 @@ def zone_subnet_map(region_cfg: RegionConfig) -> Dict[str, str]:
     return mapping
 
 
-def _parse_type_list(items: Optional[List[Dict]]) -> Optional[List[TypeConfig]]:
+def _parse_type_list(items: Optional[List[Dict]]) -> Optional[List[InstanceTypeConfig]]:
     if not items:
         return None
-    return [TypeConfig(name=item["name"], nodes=item.get("nodes")) for item in items]
+    return [InstanceTypeConfig(name=item["name"], nodes=item.get("nodes")) for item in items]
 
 
 def _parse_zones(items: Optional[List[Dict]]) -> List[ZoneConfig]:
@@ -198,6 +198,7 @@ def build_base_cfg(
     cfg.common_tag_value = "true"
     cfg.user_tag_value = user_tag
     cfg.security_group_id = region_cfg.security_group_id or account_cfg.security_group_id
+    cfg.instance_type = region_cfg.type or account_cfg.type
     zones_cfg = region_cfg.zones or []
     if len(zones_cfg) == 1:
         cfg.zone_id = zones_cfg[0].name or cfg.zone_id
@@ -485,7 +486,7 @@ def provision_region_batch(
     if plan.v_switch_id:
         cfg.v_switch_id = plan.v_switch_id
     cfg.image_id = image_id
-    cfg.instance_type = plan.instance_type_candidates[0] if plan.instance_type_candidates else None
+    cfg.instance_type = [InstanceTypeConfig(name=t) for t in plan.instance_type_candidates]
 
     ensure_keypair(
         region_client,

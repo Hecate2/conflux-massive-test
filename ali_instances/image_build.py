@@ -11,7 +11,7 @@ from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
-from .config import AliCredentials, EcsRuntimeConfig, client
+from .config import AliCredentials, EcsRuntimeConfig, InstanceTypeConfig, client
 from .instance_prep import (
     allocate_public_ip,
     create_instance,
@@ -348,7 +348,8 @@ def create_server_image(
         sel = pick_instance_type(c, cfg)
     if not sel:
         raise RuntimeError("no instance type")
-    cfg.zone_id, cfg.instance_type = sel
+    cfg.zone_id, selected_type = sel
+    cfg.instance_type = [InstanceTypeConfig(name=selected_type)]
     ensure_net(c, cfg)
     ensure_keypair(c, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     iid = ""
