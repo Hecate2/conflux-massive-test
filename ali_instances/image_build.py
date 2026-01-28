@@ -18,7 +18,6 @@ from .instance_prep import (
     delete_instance,
     ensure_keypair,
     ensure_net,
-    pick_instance_type,
     start_instance,
     stop_instance,
     wait_ssh,
@@ -29,6 +28,51 @@ from .instance_prep import (
 
 # --- Image ---
 DEFAULT_IMAGE_NAME = "conflux-docker-base"
+
+# Instance type selection defaults for image-building flow
+DEFAULT_MIN_CPU_CORES = 4
+DEFAULT_MIN_MEMORY_GB = 8.0
+DEFAULT_MAX_MEMORY_GB = 8.0
+
+
+def pick_instance_type_for_building_image(c: EcsClient, cfg: EcsRuntimeConfig) -> Optional[tuple[str, str]]:
+    spot = cfg.spot_strategy if cfg.use_spot else None
+    req = ecs_models.DescribeAvailableResourceRequest(
+        region_id=cfg.region_id,
+        destination_resource="InstanceType",
+        resource_type="instance",
+        instance_charge_type="PostPaid",
+        spot_strategy=spot,
+        cores=DEFAULT_MIN_CPU_CORES,
+        memory=DEFAULT_MIN_MEMORY_GB,
+    )
+    resp = c.describe_available_resource(req)
+    for z in resp.body.available_zones.available_zone or []:
+        if z.status_category not in {"WithStock", "ClosedWithStock"}:
+            continue
+        types = [
+            i.value
+            for r in (z.available_resources.available_resource or [])
+            if r.type == "InstanceType"
+            for i in (r.supported_resources.supported_resource or [])
+            if i.status_category in {"WithStock", "ClosedWithStock"}
+        ]
+        if not types:
+            continue
+        tresp = c.describe_instance_types(ecs_models.DescribeInstanceTypesRequest(instance_types=types))
+        tmap = {t.instance_type_id: t for t in (tresp.body.instance_types.instance_type or []) if t.instance_type_id}
+        cands = [
+            t
+            for t in tmap.values()
+            if t.cpu_core_count == DEFAULT_MIN_CPU_CORES
+            and t.memory_size
+            and DEFAULT_MIN_MEMORY_GB <= t.memory_size <= DEFAULT_MAX_MEMORY_GB
+        ]
+        if cands:
+            cands.sort(key=lambda t: (t.memory_size, t.instance_type_id))
+            s = cands[0]
+            return z.zone_id, s.instance_type_id
+    return None
 
 
 def _build_conflux_script_source() -> Path:
@@ -342,10 +386,10 @@ def create_server_image(
         return f"dry-run:{existing}" if dry_run else existing
     if dry_run:
         return f"dry-run:{name}"
-    sel = pick_instance_type(c, cfg)
+    sel = pick_instance_type_for_building_image(c, cfg)
     if not sel and cfg.use_spot:
         cfg.use_spot = False
-        sel = pick_instance_type(c, cfg)
+        sel = pick_instance_type_for_building_image(c, cfg)
     if not sel:
         raise RuntimeError("no instance type")
     cfg.zone_id, selected_type = sel
