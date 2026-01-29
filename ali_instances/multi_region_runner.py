@@ -5,7 +5,7 @@ import asyncio
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import traceback
@@ -13,7 +13,18 @@ import traceback
 from loguru import logger
 from alibabacloud_ecs20140526 import models as ecs_models
 
-from ali_instances.config import AliCredentials, EcsConfig, client, DEFAULT_USER_TAG_VALUE
+from ali_instances.config import (
+    AliCredentials,
+    AliyunConfig,
+    AccountConfig,
+    EcsRuntimeConfig,
+    RegionConfig,
+    InstanceTypeConfig,
+    ZoneConfig,
+    client,
+    DEFAULT_USER_TAG_VALUE,
+    load_credentials,
+)
 from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_images_in_regions
 from ali_instances.instance_prep import (
     allocate_public_ip,
@@ -44,49 +55,8 @@ class AliTypeSpec:
 
 
 @dataclass
-class TypeConfig:
-    name: str
-    nodes: Optional[int] = None
-
-
-@dataclass
-class ZoneConfig:
-    name: Optional[str] = None
-    subnet: Optional[str] = None
-
-
-@dataclass
-class RegionConfig:
-    name: str
-    count: int = 0
-    image: Optional[str] = None
-    base_image_name: Optional[str] = None
-    security_group_id: Optional[str] = None
-    zones: List[ZoneConfig] = field(default_factory=list)
-    type: Optional[List[TypeConfig]] = None
-
-
-@dataclass
-class AccountConfig:
-    access_key_id: str = ""
-    access_key_secret: str = ""
-    user_tag: Optional[str] = None
-    type: Optional[List[TypeConfig]] = None
-    regions: List[RegionConfig] = field(default_factory=list)
-    image: Optional[str] = None
-    base_image_name: Optional[str] = None
-    security_group_id: Optional[str] = None
-
-
-@dataclass
-class AliyunConfig:
-    aliyun: List[AccountConfig] = field(default_factory=list)
-
-
-@dataclass
 class RegionProvisionPlan:
     region_name: str
-    instance_type: str
     instance_type_candidates: List[str]
     nodes_per_host: int
     hosts_needed: int
@@ -117,7 +87,7 @@ def resolve_aliyun_types(
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> List[AliTypeSpec]:
-    types_cfg = region_cfg.type or account_cfg.type or [TypeConfig(name="ecs.g8i.xlarge")]
+    types_cfg = region_cfg.type or account_cfg.type or [InstanceTypeConfig(name="ecs.g8i.xlarge")]
     specs: List[AliTypeSpec] = []
     for item in types_cfg:
         name = item.name
@@ -146,10 +116,10 @@ def zone_subnet_map(region_cfg: RegionConfig) -> Dict[str, str]:
     return mapping
 
 
-def _parse_type_list(items: Optional[List[Dict]]) -> Optional[List[TypeConfig]]:
+def _parse_type_list(items: Optional[List[Dict]]) -> Optional[List[InstanceTypeConfig]]:
     if not items:
         return None
-    return [TypeConfig(name=item["name"], nodes=item.get("nodes")) for item in items]
+    return [InstanceTypeConfig(name=item["name"], nodes=item.get("nodes")) for item in items]
 
 
 def _parse_zones(items: Optional[List[Dict]]) -> List[ZoneConfig]:
@@ -217,8 +187,8 @@ def build_base_cfg(
     user_tag: str,
     region_cfg: RegionConfig,
     account_cfg: AccountConfig,
-) -> EcsConfig:
-    cfg = EcsConfig(credentials=creds, region_id=region_name)
+) -> EcsRuntimeConfig:
+    cfg = EcsRuntimeConfig(credentials=creds, region_id=region_name)
     cfg.ssh_username = "root"
     cfg.instance_name_prefix = prefix
     cfg.vpc_name = prefix
@@ -228,6 +198,7 @@ def build_base_cfg(
     cfg.common_tag_value = "true"
     cfg.user_tag_value = user_tag
     cfg.security_group_id = region_cfg.security_group_id or account_cfg.security_group_id
+    cfg.instance_type = region_cfg.type or account_cfg.type
     zones_cfg = region_cfg.zones or []
     if len(zones_cfg) == 1:
         cfg.zone_id = zones_cfg[0].name or cfg.zone_id
@@ -256,7 +227,7 @@ def ensure_images_for_regions(
         image_name_groups.setdefault(base_image_name, []).append(region_name)
 
     if image_name_groups:
-        cfg_template = EcsConfig(credentials=creds)
+        cfg_template = EcsRuntimeConfig(credentials=creds)
         all_region_names = [r.name for r in regions]
         for image_name, region_list in image_name_groups.items():
             image_ids_by_region.update(
@@ -327,23 +298,20 @@ def zones_with_stock(
     return zones
 
 
-def build_region_plan(
+def filter_instance_types_for_region(
     region_client,
     region_cfg: RegionConfig,
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Optional[RegionProvisionPlan]:
-    """Build a simple provisioning plan for a region.
+    """Filter instance types in a region to those with stock.
 
-    This function iterates over preferred instance types (from config
-    or account defaults) and checks per-type per-zone stock via
-    `zones_with_stock`. If a zone with stock is found for a type, we
-    compute how many hosts are needed to satisfy the requested node
-    count by dividing requested nodes by nodes_per_host and rounding
-    up (math.ceil). Returning a RegionProvisionPlan means we judged
-    that the region has sufficient stock for at least one host group
-    of the selected type; returning None indicates we found no
-    suitable type/zone with reported stock.
+    This function examines configured instance types for the region
+    (region-level or account-level) and removes any types that report
+    no stock via `DescribeAvailableResource`. If one or more types
+    remain in stock, it returns a small RegionProvisionPlan describing
+    the chosen zone, candidate types, and hosts_needed; otherwise it
+    returns None to indicate the region has no in-stock types.
     """
     region_name = region_cfg.name
     node_count = int(region_cfg.count)
@@ -353,31 +321,30 @@ def build_region_plan(
     preferred = preferred_zones(region_cfg)
     subnet_map = zone_subnet_map(region_cfg)
 
-    instance_type_candidates = [spec.name for spec in type_specs]
-
+    zones_by_type: Dict[str, List[str]] = {}
+    in_stock_specs: List[AliTypeSpec] = []
     for spec in type_specs:
-        # Check which zones report stock for this instance type.
         zones = zones_with_stock(region_client, region_name, spec.name, preferred)
         if not zones:
-            # No zones with stock for this type; try the next type.
             continue
-        # Choose the first acceptable zone. This is a simple heuristic
-        # — a more advanced solver could distribute across zones/types.
-        zone_id = zones[0]
-        # For judgement of capacity we compute how many hosts are needed
-        # to reach requested node count (nodes are packed into hosts).
-        hosts_needed = math.ceil(node_count / max(spec.nodes_per_host, 1))
-        return RegionProvisionPlan(
-            region_name=region_name,
-            instance_type=spec.name,
-            instance_type_candidates=instance_type_candidates,
-            nodes_per_host=spec.nodes_per_host,
-            hosts_needed=hosts_needed,
-            zone_id=zone_id,
-            v_switch_id=subnet_map.get(zone_id),
-        )
-    # No suitable type/zone found with stock -> region considered out of stock.
-    return None
+        zones_by_type[spec.name] = zones
+        in_stock_specs.append(spec)
+
+    instance_type_candidates = [spec.name for spec in in_stock_specs]
+    if not in_stock_specs:
+        return None
+
+    chosen = in_stock_specs[0]
+    zone_id = zones_by_type[chosen.name][0]
+    hosts_needed = math.ceil(node_count / max(chosen.nodes_per_host, 1))
+    return RegionProvisionPlan(
+        region_name=region_name,
+        instance_type_candidates=instance_type_candidates,
+        nodes_per_host=chosen.nodes_per_host,
+        hosts_needed=hosts_needed,
+        zone_id=zone_id,
+        v_switch_id=subnet_map.get(zone_id),
+    )
 
 
 def confirm_force_continue(missing_regions: List[str]) -> bool:
@@ -389,34 +356,34 @@ def confirm_force_continue(missing_regions: List[str]) -> bool:
     raise RuntimeError("provision cancelled by user")
 
 
-def build_plans_parallel(
+def filter_instance_types_parallel(
     *,
     active: List[RegionConfig],
     creds: AliCredentials,
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Dict[str, Optional[RegionProvisionPlan]]:
-    async def _build_all_plans() -> Dict[str, Optional[RegionProvisionPlan]]:
-        async def _plan_for(region_cfg: RegionConfig):
+    async def _filter_all_regions() -> Dict[str, Optional[RegionProvisionPlan]]:
+        async def _filter_for(region_cfg: RegionConfig):
             region_name = region_cfg.name
             try:
-                region_client = client(creds, region_name, None)
+                region_client = client(creds, region_name)
                 plan = await asyncio.to_thread(
-                    build_region_plan, region_client, region_cfg, account_cfg, hardware_defaults
+                    filter_instance_types_for_region, region_client, region_cfg, account_cfg, hardware_defaults
                 )
                 return region_name, plan
             except Exception as exc:
                 logger.warning(f"failed to query stock for {region_name}: {exc}")
                 return region_name, None
 
-        tasks = [_plan_for(region_cfg) for region_cfg in active]
+        tasks = [_filter_for(region_cfg) for region_cfg in active]
         results = await asyncio.gather(*tasks)
         return {name: plan for name, plan in results}
 
-    return asyncio.run(_build_all_plans())
+    return asyncio.run(_filter_all_regions())
 
 
-def wait_instance_ready(region_client, cfg: EcsConfig, instance_id: str) -> str:
+def wait_instance_ready(region_client, cfg: EcsRuntimeConfig, instance_id: str) -> str:
     st = wait_status(
         region_client,
         cfg.region_id,
@@ -503,7 +470,7 @@ def provision_region_batch(
 ) -> tuple[str, List[HostSpec]]:
     region_name = plan.region_name
     logger.info(
-        f"准备在 {region_name} 启动 {plan.hosts_needed} 台实例 (type={plan.instance_type}, zone={plan.zone_id})"
+        f"准备在 {region_name} 启动 {plan.hosts_needed} 台实例 (types={plan.instance_type_candidates}, zone={plan.zone_id})"
     )
 
     cfg = build_base_cfg(
@@ -519,7 +486,7 @@ def provision_region_batch(
     if plan.v_switch_id:
         cfg.v_switch_id = plan.v_switch_id
     cfg.image_id = image_id
-    cfg.instance_type = plan.instance_type
+    cfg.instance_type = [InstanceTypeConfig(name=t) for t in plan.instance_type_candidates]
 
     ensure_keypair(
         region_client,
@@ -599,7 +566,7 @@ def resolve_aliyun_credentials(cfg: AccountConfig) -> AliCredentials:
     sk = cfg.access_key_secret.strip()
     if ak and sk:
         return AliCredentials(ak, sk)
-    return EcsConfig().credentials
+    return load_credentials()
 
 
 def provision_aliyun_hosts(
@@ -639,7 +606,7 @@ def provision_aliyun_hosts(
                 tasks = [
                     asyncio.to_thread(
                         ensure_region_network,
-                        region_client=client(creds, region_cfg.name, None),
+                        region_client=client(creds, region_cfg.name),
                         region_cfg=region_cfg,
                         account_cfg=account_cfg,
                         creds=creds,
@@ -658,11 +625,11 @@ def provision_aliyun_hosts(
                     regions_used.append(region_name)
 
         if active and not network_only:
-            # Build provisioning plans for all active regions in parallel.
-            # Each plan inspects the region's stock via DescribeAvailableResource
-            # (performed inside build_region_plan). We call build_region_plan in
-            # separate threads so slow network/API calls don't block other checks.
-            plans = build_plans_parallel(
+            # Filter instance types with stock for all active regions in parallel.
+            # Each filter inspects the region's stock via DescribeAvailableResource
+            # (performed inside filter_instance_types_for_region). We call the
+            # parallel filter in separate threads so slow network/API calls don't block other checks.
+            available_types = filter_instance_types_parallel(
                 active=active,
                 creds=creds,
                 account_cfg=account_cfg,
@@ -673,14 +640,14 @@ def provision_aliyun_hosts(
                 tasks = []
                 for region_cfg in active:
                     region_name = region_cfg.name
-                    plan = plans.get(region_name)
+                    plan = available_types.get(region_name)
                     if plan is None:
                         logger.warning(f"{region_name} 无可用库存，跳过该区域")
                         continue
                     image_id = image_ids_by_region.get(region_name)
                     if not image_id:
                         raise RuntimeError(f"image not prepared for {region_name}")
-                    region_client = client(creds, region_name, None)
+                    region_client = client(creds, region_name)
                     tasks.append(
                         asyncio.to_thread(
                             provision_region_batch,
@@ -701,7 +668,7 @@ def provision_aliyun_hosts(
                     )
                 return await asyncio.gather(*tasks)
 
-            missing_regions = [name for name, plan in plans.items() if plan is None]
+            missing_regions = [name for name, plan in available_types.items() if plan is None]
             if missing_regions and not confirm_force_continue(missing_regions):
                 raise RuntimeError("provision cancelled by user")
             for region_name, region_hosts in asyncio.run(_provision_all_regions()):
