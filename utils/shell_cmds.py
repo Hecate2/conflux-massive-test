@@ -61,7 +61,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
     for attempt in range(max_retries):
         try:
             completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=10)
-            logger.debug(f"rsync completed: {completed.stdout}")
+            # logger.debug(f"rsync completed: {completed.stdout}")
             return  # 成功则返回
         except subprocess.CalledProcessError as e:
             stderr = getattr(e, 'stderr', '')

@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import pickle
 import shutil
-import sys
 from typing import List
 
 from dotenv import load_dotenv
 
-from ali_instances.create_servers import load_host_specs
-from ali_instances.host_spec import HostSpec
+from host_spec import HostSpec, load_hosts
 
 from remote_simulation.block_generator import generate_blocks_async
 from remote_simulation.launch_conflux_node import launch_remote_nodes
@@ -50,7 +47,7 @@ def make_parser():
     parser.add_argument(
         "-s", "--host-spec",
         type=str,
-        default=f"./ali_servers.json",
+        default=f"./hosts.json",
         help="启动日志的路径"
     )
     parser.add_argument(
@@ -75,10 +72,8 @@ if __name__ == "__main__":
     # 1. 启动远程服务器
     # 从配置文件中读取已经启动好的服务器
 
-    host_specs = load_launched_hosts(args.host_spec)
-
-    # with open("instances.pkl", "rb") as file:
-    #     instances: Instances = pickle.load(file)
+    host_specs = load_hosts(args.host_spec)
+    shutil.copy(args.host_spec, f"{log_path}/host.json")
     
     
     logger.info(f"实例列表集合 {[s.ip for s in host_specs]}")
@@ -96,9 +91,6 @@ if __name__ == "__main__":
 
     logger.success(f"完成配置文件 {config_file.path}")
     shutil.copy(config_file.path, f"{log_path}/config.toml")
-
-    log_path = f"logs/{generate_timestamp()}"
-    Path(log_path).mkdir(parents=True, exist_ok=True)
 
     # 3. 启动节点
     nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=True)

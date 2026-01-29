@@ -20,10 +20,10 @@ cleanup() {
     # 临时关闭 'set -e'，防止销毁过程中的小错误阻断日志打印
     set +e
     
-    # print_separator "正在执行清理操作: 销毁 EC2 实例..."
-    # $PYTHON -m ali_instances.cleanup_resources --instances-json ali_servers.json
+    print_separator "正在执行清理操作: 销毁 EC2 实例..."
+    $PYTHON -m ali_instances.cleanup_resources --instances-json ali_servers.json
     
-    print_separator "跳过销毁实例"
+    # print_separator "跳过销毁实例"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 脚本执行结束。"
 }
 
