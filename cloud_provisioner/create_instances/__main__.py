@@ -1,6 +1,6 @@
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
 import tomllib
 
@@ -14,19 +14,19 @@ from ..host_spec import save_hosts
 from .provider_interface import IEcsClient
 from .instance_config import InstanceConfig
 from .instance_provisioner import create_instances_in_region
-from .network_infra import InfraRequest
+from .network_infra import InfraRequest, InfraProvider
 from .types import InstanceType
 from .provision_config import CloudConfig, ProvisionConfig
 
 
-def create_instances(client: IEcsClient, cloud_config: CloudConfig, allow_create: bool, infra_only: bool, output_json: str):
+def ensure_provider_infra(client: IEcsClient, cloud_config: CloudConfig, allow_create: bool):
     request = InfraRequest.from_config(cloud_config, allow_create=allow_create)
     provider = request.ensure_infras(client)
     logger.success(f"{cloud_config.provider} infra check pass")
+    return provider
 
-    if infra_only:
-        return
-    
+
+def create_instances_with_infra_provider(client: IEcsClient, cloud_config: CloudConfig, provider: InfraProvider):
     instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
     instance_types = [InstanceType(i.name, i.nodes)
                       for i in cloud_config.instance_types]
@@ -35,11 +35,9 @@ def create_instances(client: IEcsClient, cloud_config: CloudConfig, allow_create
         return create_instances_in_region(client, instance_config, region_info=provider.get_region(region_id), instance_types=instance_types, nodes=nodes, ssh_user=cloud_config.default_user_name, provider=cloud_config.provider)
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(lambda reg: _create_in_region(
-            reg.name, reg.count), cloud_config.regions))
+        results = list(executor.map(lambda reg: _create_in_region(reg.name, reg.count), cloud_config.regions))
         hosts = list(chain.from_iterable(results))
-
-    save_hosts(hosts, output_json)
+    return hosts
 
 
 def make_parser():
@@ -79,8 +77,31 @@ if __name__ == "__main__":
         data = tomllib.load(f)
         config = ProvisionConfig(**data)
 
-    ali_client = AliyunClient.load_from_env()
-    create_instances(ali_client, config.aliyun, args.allow_create, args.network_only, args.output_json)
-    
-    aws_client = AwsClient.new()
-    create_instances(aws_client, config.aws, args.allow_create, args.network_only, args.output_json)
+    providers = [
+        ("aliyun", AliyunClient.load_from_env(), config.aliyun),
+        ("aws", AwsClient.new(), config.aws),
+    ]
+
+    # Phase 1: ensure infra checks concurrently for all providers
+    future_to_info = {}
+    provider_map = {}
+    with ThreadPoolExecutor(max_workers=len(providers)) as executor:
+        future_to_info = {executor.submit(ensure_provider_infra, client, conf, args.allow_create): (name, client, conf) for name, client, conf in providers}
+        for fut in as_completed(future_to_info):
+            name, client, conf = future_to_info[fut]
+            provider = fut.result()
+            provider_map[name] = (client, conf, provider)
+
+    if args.network_only:
+        logger.success("Network infra ready for all providers")
+        exit(0)
+
+    # Phase 2: create instances in parallel across providers
+    all_hosts = []
+    with ThreadPoolExecutor(max_workers=len(provider_map)) as executor:
+        future_to_name = {executor.submit(create_instances_with_infra_provider, client, conf, provider): name for name, (client, conf, provider) in provider_map.items()}
+        for fut in as_completed(future_to_name):
+            hosts = fut.result()
+            all_hosts.extend(hosts)
+
+    save_hosts(all_hosts, args.output_json)
