@@ -5,19 +5,29 @@ import time
 import traceback
 from typing import List
 
-from alibabacloud_ecs20140526 import models as ali_models
+from alibabacloud_ecs20140526.models import DescribeInstancesRequest, RunInstancesRequestTag, RunInstancesRequestSystemDisk, RunInstancesRequest, DescribeInstancesResponseBodyInstancesInstance, DeleteInstancesRequest
 from loguru import logger
+
+from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from alibabacloud_ecs20140526.client import Client
     
 
-def _instance_tags(cfg: InstanceConfig) -> List[ali_models.RunInstancesRequestTag]:
+def _instance_tags(cfg: InstanceConfig) -> List[RunInstancesRequestTag]:
     return [
-        ali_models.RunInstancesRequestTag(key=DEFAULT_COMMON_TAG_KEY, value=DEFAULT_COMMON_TAG_VALUE),
-        ali_models.RunInstancesRequestTag(key=cfg.user_tag_key, value=cfg.user_tag_value)
+        RunInstancesRequestTag(key=DEFAULT_COMMON_TAG_KEY, value=DEFAULT_COMMON_TAG_VALUE),
+        RunInstancesRequestTag(key=cfg.user_tag_key, value=cfg.user_tag_value)
     ]
+    
+def as_instance_info_with_tag(rep: DescribeInstancesResponseBodyInstancesInstance):
+    if rep.tags:
+        tags = {tag.tag_key: tag.tag_value for tag in rep.tags.tag}
+    else:
+        tags = dict()
+    return InstanceInfoWithTag(instance_id=rep.instance_id, instance_name=rep.instance_name, tags=tags) # pyright: ignore[reportArgumentType]
+    
 
 def create_instances_in_zone(
     client: Client,
@@ -28,10 +38,10 @@ def create_instances_in_zone(
     amount: int,
     allow_partial_success: bool = False,
 ) -> list[str]:    
-    disk = ali_models.RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
+    disk = RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
         
-    req = ali_models.RunInstancesRequest(
+    req = RunInstancesRequest(
         region_id=region_info.id,
         zone_id=zone_info.id,
         image_id=region_info.image_id,
@@ -75,7 +85,7 @@ def describe_instance_status(client: Client, region_id: str, instance_ids: List[
     for i in range(0, len(instance_ids), 100):
         query_chunk = instance_ids[i: i+100]
         
-        rep = client.describe_instances(ali_models.DescribeInstancesRequest(
+        rep = client.describe_instances(DescribeInstancesRequest(
             region_id=region_id, page_size=100, instance_ids=json.dumps(query_chunk)))
         instance_status = rep.body.instances.instance
 
@@ -87,3 +97,31 @@ def describe_instance_status(client: Client, region_id: str, instance_ids: List[
                                  "Starting", "Pending", "Stopped"]})
         time.sleep(0.5)
     return InstanceStatus(running_instances=running_instances, pending_instances=pending_instances)
+
+
+def get_instances_with_tag(client: Client, region_id: str) -> List[InstanceInfoWithTag]:
+    instances = []
+    page_number = 1
+    
+    while True:
+        rep = client.describe_instances(DescribeInstancesRequest(region_id=region_id, page_number=page_number, page_size=50))
+        instances.extend([as_instance_info_with_tag(instance) for instance in rep.body.instances.instance])
+        
+        if rep.body.total_count <= page_number * 50:
+            break
+        page_number += 1
+        
+    return instances
+
+def delete_instances(client: Client, region_id: str, instances_ids: List[str]):
+    for i in range(0, len(instances_ids), 100):
+        chunks = instances_ids[i:i+100]
+        while True: 
+            try: 
+                client.delete_instances(DeleteInstancesRequest(region_id = region_id, force_stop=True, force=True, instance_id=chunks))
+                break
+            except Exception as e:
+                code = getattr(e, "code", None)
+                if code == "IncorrectInstanceStatus.Initializing":
+                    logger.warning(f"Some instances in region {region_id} is still initializing, waiting_retry")
+            time.sleep(5)

@@ -7,6 +7,8 @@ from typing import List
 from botocore.exceptions import ClientError
 from loguru import logger
 
+from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
+
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 
@@ -18,6 +20,20 @@ def _instance_tags(cfg: InstanceConfig) -> List[dict]:
         {'Key': DEFAULT_COMMON_TAG_KEY, 'Value': DEFAULT_COMMON_TAG_VALUE},
         {'Key': cfg.user_tag_key, 'Value': cfg.user_tag_value}
     ]
+    
+def as_instance_info_with_tag(instance):
+    if instance.get('Tags'):
+        tags = {tag['Key']: tag['Value'] for tag in instance['Tags']}
+    else:
+        tags = dict()
+    
+    instance_name = tags.get('Name', '')
+    
+    return InstanceInfoWithTag(
+        instance_id=instance['InstanceId'], 
+        instance_name=instance_name, 
+        tags=tags
+    )
 
 def create_instances_in_zone(
     client: EC2Client,
@@ -105,3 +121,41 @@ def describe_instance_status(client: EC2Client, instance_ids: List[str]):
         time.sleep(0.5)
     
     return InstanceStatus(running_instances=running_instances, pending_instances=pending_instances)
+
+def get_instances_with_tag(client: EC2Client) -> List[InstanceInfoWithTag]:
+    instances = []
+    next_token = None
+    
+    while True:
+        params = {}
+        if next_token:
+            params['NextToken'] = next_token
+        
+        response = client.describe_instances(**params)
+        
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instances.append(as_instance_info_with_tag(instance))
+        
+        next_token = response.get('NextToken')
+        if not next_token:
+            break
+    
+    return instances
+
+
+def delete_instances(client, instances_ids: List[str]):
+    for i in range(0, len(instances_ids), 1000):
+        chunks = instances_ids[i:i+1000]
+        while True:
+            try:
+                client.terminate_instances(InstanceIds=chunks)
+                break
+            except Exception as e:
+                logger.error(f"Cannot delete: {e.__dict__}")
+                # 下面的逻辑移植自阿里云，但 aws 好像没有这个问题：禁止删除 initialize 阶段的 instance
+                # response = getattr(e, 'response', {})
+                # error_code = response.get('Error', {}).get('Code')
+                # if error_code == 'IncorrectInstanceState':
+                #     logger.warning(f"Some instances in region {region_id} is still initializing, waiting_retry")
+            time.sleep(5)

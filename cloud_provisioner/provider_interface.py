@@ -1,7 +1,8 @@
 from typing import List, Optional, Protocol
 
-from cloud_provisioner.create_instances.instance_config import InstanceConfig
-from cloud_provisioner.create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from .create_instances.instance_config import InstanceConfig
+from .create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from .cleanup_instances.types import InstanceInfoWithTag
 
 from abc import ABC, abstractmethod
 from typing import List, Optional
@@ -14,6 +15,10 @@ class IEcsClient(ABC):
 
     @abstractmethod
     def describe_instance_status(self, region_id: str, instance_ids: List[str]) -> InstanceStatus:
+        ...
+        
+    @abstractmethod
+    def get_instances_with_tag(self, region_id: str) -> List[InstanceInfoWithTag]:
         ...
 
     @abstractmethod
@@ -46,6 +51,10 @@ class IEcsClient(ABC):
         amount: int,
         allow_partial_success: bool = False,
     ) -> list[str]:
+        ...
+        
+    @abstractmethod
+    def delete_instances(self, region_id: str, instances_ids: List[str]):
         ...
 
     @abstractmethod
