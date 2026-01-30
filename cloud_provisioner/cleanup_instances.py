@@ -6,6 +6,9 @@ from alibabacloud_ecs20140526.models import DescribeInstancesRequest, DeleteInst
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from dotenv import load_dotenv
 from loguru import logger
+import argparse
+import tomllib
+import sys
 
 from cloud_provisioner.aliyun_provider.client_factory import AliyunClient
 from cloud_provisioner.aws_provider.client_factory import AwsClient
@@ -131,9 +134,45 @@ def check_tag(instance: InstanceInfo, user_prefix: str):
         
 if __name__ == "__main__":
     load_dotenv()
+
+    parser = argparse.ArgumentParser(description="Cleanup instances by user prefix")
+    parser.add_argument("--user-prefix", type=str, default="lichenxing-alpha", help="Prefix to match the user tag on instances (default: lichenxing-alpha)")
+    parser.add_argument("-y", "--yes", action="store_true", help="Assume yes to confirmation prompt and proceed")
+    args = parser.parse_args()
+
+    # Read user_tag values from request_config.toml
+    try:
+        with open("request_config.toml", "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        logger.error("request_config.toml not found in cwd, aborting")
+        sys.exit(1)
+
+    aliyun_user_tag = data.get("aliyun", {}).get("user_tag", "")
+    aws_user_tag = data.get("aws", {}).get("user_tag", "")
+
+    mismatches = []
+    if not aliyun_user_tag.startswith(args.user_prefix):
+        mismatches.append(("aliyun", aliyun_user_tag))
+    if not aws_user_tag.startswith(args.user_prefix):
+        mismatches.append(("aws", aws_user_tag))
+
+    if mismatches:
+        logger.warning(f"Provided user prefix '{args.user_prefix}' is not a prefix of the following user_tag(s) from config toml:")
+        for prov, tag in mismatches:
+            logger.warning(f" - {prov}: '{tag}'")
+
+        if not args.yes:
+            resp = input("Proceed anyway? [y/N]: ").strip().lower()
+            if resp not in ("y", "yes"):
+                logger.info("Aborting cleanup due to user cancellation")
+                sys.exit(1)
+        else:
+            logger.info("Proceeding despite mismatched prefix due to --yes flag")
+
     aliyun_factory = AliyunClient.load_from_env()
     aws_factory = AwsClient.new()
-    user_prefix = "lichenxing-alpha"
+    user_prefix = args.user_prefix
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         _ = list(executor.map(
