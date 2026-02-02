@@ -103,6 +103,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     load_dotenv()
+    
+    from utils.logger import configure_logger
+    configure_logger()
 
     with open("request_config.toml", "rb") as f:
         data = tomllib.load(f)

@@ -57,6 +57,10 @@ if __name__ == "__main__":
 
     parser = make_parser()
     args = parser.parse_args()
+    
+    from utils.logger import configure_logger
+    configure_logger()
+    
     log_path = args.log_path
 
     Path(log_path).mkdir(parents=True, exist_ok=True)
