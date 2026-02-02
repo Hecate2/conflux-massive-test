@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import time
-from typing import Callable, Dict, List, Any
+from typing import Callable, Dict, List, Any, Optional, Tuple
 from alibabacloud_ecs20140526.models import DescribeInstancesRequest, DeleteInstancesRequest, DescribeInstancesResponseBodyInstancesInstance
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from dotenv import load_dotenv
@@ -130,68 +130,108 @@ def delete_aws_instances(factory: AwsClient, predicate: Callable[[InstanceInfo],
 
 def check_tag(instance: InstanceInfo, user_prefix: str):
     return instance.tags.get(DEFAULT_COMMON_TAG_KEY) == DEFAULT_COMMON_TAG_VALUE and instance.tags.get(DEFAULT_USER_TAG_KEY, "").startswith(user_prefix)
-    
-        
-if __name__ == "__main__":
-    load_dotenv()
 
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cleanup instances by user prefix")
-    parser.add_argument("--user-prefix", type=str, default="lichenxing-alpha", help="Prefix to match the user tag on instances (default: lichenxing-alpha)")
+    parser.add_argument(
+        "--user-prefix",
+        type=str,
+        default="lichenxing-alpha",
+        help="Prefix to match the user tag on instances (default: lichenxing-alpha)",
+    )
     parser.add_argument("-y", "--yes", action="store_true", help="Assume yes to confirmation prompt and proceed")
-    args = parser.parse_args()
+    return parser
 
-    # Read user_tag values from request_config.toml
+
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = _build_arg_parser()
+    return parser.parse_args(argv)
+
+
+def _load_request_config(path: str) -> Dict[str, Any]:
     try:
-        with open("request_config.toml", "rb") as f:
-            data = tomllib.load(f)
+        with open(path, "rb") as f:
+            return tomllib.load(f)
     except FileNotFoundError:
         logger.error("request_config.toml not found in cwd, aborting")
         sys.exit(1)
 
-    aliyun_user_tag = data.get("aliyun", {}).get("user_tag", "")
-    aws_user_tag = data.get("aws", {}).get("user_tag", "")
 
-    mismatches = []
-    if not aliyun_user_tag.startswith(args.user_prefix):
-        mismatches.append(("aliyun", aliyun_user_tag))
-    if not aws_user_tag.startswith(args.user_prefix):
-        mismatches.append(("aws", aws_user_tag))
+def _get_user_tags_from_config(data: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "aliyun": data.get("aliyun", {}).get("user_tag", ""),
+        "aws": data.get("aws", {}).get("user_tag", ""),
+    }
 
-    if mismatches:
-        logger.warning(f"Provided user prefix '{args.user_prefix}' is not a prefix of the following user_tag(s) from config toml:")
-        for prov, tag in mismatches:
-            logger.warning(f" - {prov}: '{tag}'")
 
-        if not args.yes:
-            resp = input("Proceed anyway? [y/N]: ").strip().lower()
-            if resp not in ("y", "yes"):
-                logger.info("Aborting cleanup due to user cancellation")
-                sys.exit(1)
-        else:
-            logger.info("Proceeding despite mismatched prefix due to --yes flag")
+def _find_prefix_mismatches(user_prefix: str, user_tags: Dict[str, str]) -> List[Tuple[str, str]]:
+    mismatches: List[Tuple[str, str]] = []
+    for provider, tag in user_tags.items():
+        if not tag.startswith(user_prefix):
+            mismatches.append((provider, tag))
+    return mismatches
 
-    # Destructive confirmation when empty prefix is provided (matches all instances subject to common tag)
-    # python -m cloud_provisioner.cleanup_instances --user-prefix ""
-    if args.user_prefix == "":
-        logger.warning("Empty --user-prefix will match ALL instances (filtered only by common tag: '%s=%s')!", DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE)
-        if not args.yes:
-            resp = input("Proceed anyway? [y/N]: ").strip().lower()
-            if resp not in ("y", "yes"):
-                logger.info("Aborting cleanup due to user cancellation")
-                sys.exit(1)
-        else:
-            logger.info("Proceeding with empty prefix due to --yes flag")
 
+def _confirm_or_abort(message: str, assume_yes: bool, assume_yes_log: str) -> None:
+    if assume_yes:
+        logger.info(assume_yes_log)
+        return
+    resp = input(message).strip().lower()
+    if resp not in ("y", "yes"):
+        logger.info("Aborting cleanup due to user cancellation")
+        sys.exit(1)
+
+
+def _handle_prefix_mismatch(user_prefix: str, user_tags: Dict[str, str], assume_yes: bool) -> None:
+    mismatches = _find_prefix_mismatches(user_prefix, user_tags)
+    if not mismatches:
+        return
+    logger.warning(
+        f"Provided user prefix '{user_prefix}' is not a prefix of the following user_tag(s) from config toml:",
+    )
+    for prov, tag in mismatches:
+        logger.warning(f"{prov}: '{tag}'")
+    _confirm_or_abort("Proceed anyway? [y/N]: ", assume_yes, "Proceeding despite mismatched prefix due to --yes flag")
+
+
+def _handle_empty_prefix(user_prefix: str, assume_yes: bool) -> None:
+    if user_prefix != "":
+        return
+    logger.warning(
+        "Empty --user-prefix will match ALL instances (filtered only by common tag: '%s=%s')!",
+        DEFAULT_COMMON_TAG_KEY,
+        DEFAULT_COMMON_TAG_VALUE,
+    )
+    _confirm_or_abort("Proceed anyway? [y/N]: ", assume_yes, "Proceeding with empty prefix due to --yes flag")
+
+
+def _run_cleanup(user_prefix: str) -> None:
     aliyun_factory = AliyunClient.load_from_env()
     aws_factory = AwsClient.new()
-    user_prefix = args.user_prefix
-
     with ThreadPoolExecutor(max_workers=2) as executor:
-        _ = list(executor.map(
-            lambda fn: fn(),
-            [
-                lambda: delete_ali_instances(aliyun_factory, lambda instance: check_tag(instance, user_prefix)),
-                lambda: delete_aws_instances(aws_factory, lambda instance: check_tag(instance, user_prefix)),
-            ],
-        ))
+        _ = list(
+            executor.map(
+                lambda fn: fn(),
+                [
+                    lambda: delete_ali_instances(aliyun_factory, lambda instance: check_tag(instance, user_prefix)),
+                    lambda: delete_aws_instances(aws_factory, lambda instance: check_tag(instance, user_prefix)),
+                ],
+            )
+        )
+
+
+def main() -> None:
+    load_dotenv()
+    args = _parse_args()
+
+    data = _load_request_config("request_config.toml")
+    user_tags = _get_user_tags_from_config(data)
+    _handle_prefix_mismatch(args.user_prefix, user_tags, args.yes)
+    _handle_empty_prefix(args.user_prefix, args.yes)
+    _run_cleanup(args.user_prefix)
+
+
+if __name__ == "__main__":
+    main()
         
