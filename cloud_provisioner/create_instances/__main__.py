@@ -2,9 +2,12 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
+import sys
 import threading
 import tomllib
 import traceback
+from typing import Optional
+import os
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -17,38 +20,42 @@ from ..provider_interface import IEcsClient
 
 from .instance_config import InstanceConfig
 from .instance_provisioner import create_instances_in_region
-from .network_infra import InfraRequest
+from .network_infra import InfraProvider, InfraRequest
 from .types import InstanceType
 from .provision_config import CloudConfig, ProvisionConfig
 
 
-def _ensure_network_infra(client: IEcsClient, cloud_config: CloudConfig, allow_create):
-    request = InfraRequest.from_config(cloud_config, allow_create=allow_create)
-    infra_provider = request.ensure_infras(client)
-    logger.success(f"{cloud_config.provider} infra check pass")
-    
-    return infra_provider
-
 def create_instances(client: IEcsClient, cloud_config: CloudConfig, barrier: threading.Barrier, allow_create: bool, infra_only: bool):
+    infra_provider = _ensure_network_infra(client, cloud_config, allow_create)
+
+    if infra_only or infra_provider is None:
+        return []
+    else:
+        return create_instances_in_multi_region(client, cloud_config, infra_provider)
+    
+def _ensure_network_infra(client: IEcsClient, cloud_config: CloudConfig, allow_create) -> Optional[InfraProvider]:
     try:
-        infra_provider = _ensure_network_infra(client, cloud_config, allow_create)
+        request = InfraRequest.from_config(cloud_config, allow_create=allow_create)
+        infra_provider = request.ensure_infras(client)
+        logger.success(f"{cloud_config.provider} infra check pass")
         barrier.wait()
     except threading.BrokenBarrierError:
         logger.debug(f"{cloud_config.provider} quit due to other cloud providers fails")
         barrier.abort()
-        return []
+        return None
     except Exception as e:
         logger.error(f"Fail to build network infra: {e}")
         barrier.abort()
         print(traceback.format_exc())
-        return []
-
-    if infra_only:
-        return []
+        return None
     
+    return infra_provider
+    
+def create_instances_in_multi_region(client: IEcsClient, cloud_config: CloudConfig, infra_provider: InfraProvider):
     instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
     instance_types = [InstanceType(i.name, i.nodes)
                       for i in cloud_config.instance_types]
+    regions = filter(lambda reg: reg.count>0, cloud_config.regions)
 
     def _create_in_region(region_id: str, nodes: int):
         return create_instances_in_region(client, 
@@ -61,7 +68,7 @@ def create_instances(client: IEcsClient, cloud_config: CloudConfig, barrier: thr
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(lambda reg: _create_in_region(
-            reg.name, reg.count), cloud_config.regions))
+            reg.name, reg.count), regions))
         hosts = list(chain.from_iterable(results))
 
     return hosts
@@ -94,25 +101,36 @@ def make_parser():
     return parser
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":    
     parser = make_parser()
     args = parser.parse_args()
 
     load_dotenv()
+    
+    from utils.logger import configure_logger
+    configure_logger()
 
     with open("request_config.toml", "rb") as f:
         data = tomllib.load(f)
         config = ProvisionConfig(**data)
+        
+    user_tag_prefix = os.getenv("USER_TAG_PREFIX", "")
 
     cloud_tasks = []
     
     if config.aws.total_nodes > 0:
         aws_client = AwsClient.new()
         cloud_tasks.append((aws_client, config.aws))
-    
+        if not config.aws.user_tag.startswith(user_tag_prefix):
+            logger.error(f"AWS user tag {config.aws.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
+            sys.exit(1)
+     
     if config.aliyun.total_nodes > 0:
         ali_client = AliyunClient.load_from_env()
         cloud_tasks.append((ali_client, config.aliyun))
+        if not config.aliyun.user_tag.startswith(user_tag_prefix):
+            logger.error(f"Aliyun User tag {config.aliyun.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
+            sys.exit(1)
         
     if config.tencent.total_nodes > 0:
         tencent_client = TencentClient.load_from_env()
@@ -129,3 +147,4 @@ if __name__ == "__main__":
         hosts = list(chain.from_iterable(future.result() for future in futures))
         
     save_hosts(hosts, args.output_json)
+    logger.success(f"节点启动完成，节点信息已写入 {args.output_json}")

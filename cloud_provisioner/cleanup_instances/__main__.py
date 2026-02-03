@@ -24,6 +24,7 @@ ALI_REGIONS = [
 ]
 AWS_REGIONS = [
     "us-west-2",   # Oregon
+    "sa-east-1",   # São Paulo
     "af-south-1",  # Cape Town
     "me-south-1",  # Bahrain
 ]
@@ -35,11 +36,11 @@ TENCENT_REGIONS = [
         
 
 def _delete_in_region(client: IEcsClient, region_id: str, predicate: Callable[[InstanceInfoWithTag], bool]):
-    logger.info(f"Cleanup region {region_id}")
+    logger.info(f"Cleaning region {region_id}")
     instances = client.get_instances_with_tag(region_id)
     instances = list(filter(predicate, instances))
     if len(instances) > 0:
-        logger.debug(f"{len(instances)} instances to terminate: {instances}")
+        logger.debug(f"{len(instances)} instances to terminate in region {region_id}: {instances}")
         instance_ids = [instance.instance_id for instance in instances]
         client.delete_instances(region_id, instance_ids)
     logger.success(f"Cleanup region {region_id} done")
@@ -63,6 +64,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-check", action="store_true", help="Skip check if the user-prefix matches configuration")
     parser.add_argument("-y", "--yes", action="store_true", help="Assume yes to confirmation prompt and proceed")
     args = parser.parse_args()
+            
+    from utils.logger import configure_logger
+    configure_logger()
+
 
     check_user_prefix_with_config_file(args.config, args.user_prefix, args.yes)
     check_empty_user_prefix(args.user_prefix, args.yes, f"Empty --user-prefix will match ALL instances (filtered only by common tag: '{DEFAULT_COMMON_TAG_KEY}={DEFAULT_COMMON_TAG_VALUE}')!")

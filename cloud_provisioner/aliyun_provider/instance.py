@@ -73,9 +73,11 @@ def create_instances_in_zone(
         code = getattr(exc, "code", None)
         if code == "OperationDenied.NoStock":
             logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={amount}")
-            return []
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
+        elif code == "InvalidResourceType.NotSupported":
+            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={amount}")
+        else:
+            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(e)
         return []
     
 def describe_instance_status(client: Client, region_id: str, instance_ids: List[str]):

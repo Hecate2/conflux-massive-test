@@ -135,6 +135,10 @@ def get_instances_with_tag(client: EC2Client) -> List[InstanceInfoWithTag]:
         
         for reservation in response['Reservations']:
             for instance in reservation['Instances']:
+                # AWS API 会返回已经销毁的实例，状态为 terminated，应该被忽略
+                if instance['State']['Name'] == 'terminated':
+                    continue
+                
                 instances.append(as_instance_info_with_tag(instance))
         
         next_token = response.get('NextToken')
