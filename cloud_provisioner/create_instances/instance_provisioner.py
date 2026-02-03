@@ -37,10 +37,20 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, *, regio
             logger.success(f"Region {region_info.id} launch complete")
             break
 
-        instance_ids = client.create_instances_in_zone(
-            cfg, region_info, zone_info, instance_type, amount, allow_partial_success=True)
+        # Compute how many hosts we actually need for this instance type
+        hosts_to_request = math.ceil(rest_nodes / instance_type.nodes)
+        if hosts_to_request <= 0:
+            # nothing required
+            break
 
-        if len(instance_ids) < amount:
+        instance_ids = client.create_instances_in_zone(
+            cfg, region_info, zone_info, instance_type, hosts_to_request, allow_partial_success=True)
+
+        # Submit any returned instances to verifier so they're tracked (prevents over-creation)
+        if len(instance_ids) > 0:
+            verifier.submit_pending_instances(instance_ids, instance_type)
+
+        if len(instance_ids) < hosts_to_request:
             # 当前实例组合可用已经耗尽，尝试下一组
             try:
                 instance_type, zone_info = next(zone_plan)
@@ -68,13 +78,19 @@ def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, c
     for zone_info in region_info.zones.values():
         ids = client.create_instances_in_zone(
             cfg, region_info, zone_info, instance_type, amount)
-        if len(ids) == 0:
+        if not ids:
             continue
-        elif len(ids) < amount:
+
+        # Track whatever instances returned (even partial successes) to avoid over-creating
+        verifier.submit_pending_instances(ids, instance_type)
+
+        if len(ids) < amount:
             # TODO: 关闭部分成功的 instance?
             logger.warning(
                 f"Only partial create instance success, even if minimum required ({region_info.id}/{zone_info.id})")
+            # Continue to try other zones to satisfy the remaining requested hosts
+            continue
         else:
-            verifier.submit_pending_instances(ids, instance_type)
+            # Got full batch in a single zone; submit and return
             # 无论这些实例是否都成功，不会再走 create_in_single_zone 的逻辑
             return
