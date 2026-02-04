@@ -87,7 +87,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
             # print(f"Timeout on attempt {attempt + 1}, retrying...")
 
 
-def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None = None, *, max_retries: int = 3, retry_delay: int = 15):
+def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None = None, *, max_retries: int = 3, retry_delay: int = 15, input_data: str | None = None):
     if command is None:
         return
     
@@ -105,7 +105,7 @@ def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None =
 
     for attempt in range(max_retries):
         try:
-            result = subprocess.run(ssh_cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(ssh_cmd, check=True, capture_output=True, text=True, input=input_data)
             return result
         except subprocess.CalledProcessError as e:
             if attempt < max_retries - 1:
@@ -141,22 +141,27 @@ def inject_dockerhub_mirrors(
     if insecure_registries:
         daemon_payload["insecure-registries"] = insecure_registries
     daemon_config = json.dumps(daemon_payload, indent=2)
-    cmd = (
-        "set -e\n"
-        "mkdir -p /etc/docker\n"
-        "cat <<'EOF' > /etc/docker/daemon.json\n"
-        f"{daemon_config}\n"
-        "EOF\n"
-        "if command -v systemctl >/dev/null 2>&1; then\n"
-        "  systemctl restart docker\n"
-        "elif command -v service >/dev/null 2>&1; then\n"
-        "  service docker restart\n"
-        "fi\n"
+    # Use a single-line command and send JSON via stdin (no JSON embedded in the command)
+    write_cmd = "mkdir -p /etc/docker && cat > /etc/docker/daemon.json"
+    # Write /etc/docker/daemon.json to the remote machine by sending JSON on stdin
+    ssh(
+        ip_address,
+        user,
+        ["bash", "-lc", write_cmd],
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+        input_data=daemon_config,
     )
+
+    # Copy the restart-only script and execute it
+    local_script = "auxiliary/scripts/remote/inject_dockerhub_mirrors.sh"
+    remote_script = "/tmp/inject_dockerhub_mirrors.sh"
+    scp(local_script, ip_address, user=user, remote_path=remote_script, max_retries=max_retries, retry_delay=retry_delay)
+
     return ssh(
         ip_address,
         user,
-        ["bash", "-lc", cmd],
+        ["bash", "-lc", f"chmod +x {remote_script} && {remote_script}"],
         max_retries=max_retries,
         retry_delay=retry_delay,
     )
