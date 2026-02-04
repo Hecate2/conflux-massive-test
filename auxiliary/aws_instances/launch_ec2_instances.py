@@ -70,6 +70,7 @@ class Instances:
             InstanceType=config.instance_type,
             SecurityGroupIds=[config.security_group_id],
             SubnetId=config.subnet_id,
+            
             BlockDeviceMappings=[
                 {
                     'DeviceName': '/dev/sda1',

@@ -7,7 +7,7 @@ from typing import Any, Callable, List, Optional, Tuple, TypeVar
 import eth_utils
 from loguru import logger
 
-from ali_instances.host_spec import HostSpec
+from cloud_provisioner.host_spec import HostSpec
 from conflux.utils import convert_to_nodeid, encode_int32, int_to_bytes, sha3
 
 from jsonrpcclient.clients.http_client import HTTPClient

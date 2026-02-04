@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from ali_instances.multi_region_runner import provision_aliyun_hosts
-from ali_instances.host_spec import HostSpec
+from cloud_provisioner.host_spec import HostSpec
 
 
 def generate_timestamp() -> str:
@@ -140,6 +140,7 @@ def main() -> None:
 
     timestamp = generate_timestamp()
     log_dir = root / "logs" / timestamp
+    logger.info(f"{len(hosts)} Aliyun hosts provisioned")
     write_inventory(hosts, timestamp, log_dir, root)
     if args.network_only:
         logger.success(

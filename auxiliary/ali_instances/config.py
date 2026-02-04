@@ -1,10 +1,10 @@
 """Aliyun ECS configuration and client helpers."""
 from dataclasses import dataclass, field
 import os
-from typing import Optional
+from typing import List, Optional
 
 from alibabacloud_ecs20140526.client import Client as EcsClient
-from alibabacloud_tea_openapi.models import Config as AliyunConfig
+from alibabacloud_tea_openapi.models import Config as AliyunOpenApiConfig
 from dotenv import load_dotenv
 
 DEFAULT_REGION = "ap-southeast-3"
@@ -17,6 +17,7 @@ DEFAULT_COMMON_TAG_KEY = "conflux-massive-test"
 DEFAULT_COMMON_TAG_VALUE = "true"
 DEFAULT_USER_TAG_KEY = "user"
 DEFAULT_USER_TAG_VALUE = "your_name"
+RUN_INSTANCES_MAX_AMOUNT = 100
 
 
 @dataclass
@@ -26,18 +27,52 @@ class AliCredentials:
 
 
 @dataclass
-class EcsConfig:
+class InstanceTypeConfig:
+    name: str
+    nodes: Optional[int] = None
+
+
+@dataclass
+class ZoneConfig:
+    name: Optional[str] = None
+    subnet: Optional[str] = None
+
+
+@dataclass
+class RegionConfig:
+    name: str
+    count: int = 0
+    image: Optional[str] = None
+    base_image_name: Optional[str] = None
+    security_group_id: Optional[str] = None
+    zones: List[ZoneConfig] = field(default_factory=list)
+    type: Optional[List[InstanceTypeConfig]] = None
+
+
+@dataclass
+class AccountConfig:
+    access_key_id: str = ""
+    access_key_secret: str = ""
+    user_tag: Optional[str] = None
+    type: Optional[List[InstanceTypeConfig]] = None
+    regions: List[RegionConfig] = field(default_factory=list)
+    image: Optional[str] = None
+    base_image_name: Optional[str] = None
+    security_group_id: Optional[str] = None
+
+
+@dataclass
+class AliyunConfig:
+    aliyun: List[AccountConfig] = field(default_factory=list)
+
+
+@dataclass
+class EcsRuntimeConfig:
     credentials: AliCredentials = field(default_factory=lambda: load_credentials())
     region_id: str = DEFAULT_REGION
     zone_id: Optional[str] = None
-    endpoint: Optional[str] = None
-    base_image_id: Optional[str] = None
     image_id: Optional[str] = None
-    instance_type: Optional[str] = None
-    min_cpu_cores: int = 4
-    min_memory_gb: float = 8.0
-    max_memory_gb: float = 8.0
-    cpu_vendor: Optional[str] = None
+    instance_type: Optional[List[InstanceTypeConfig]] = None
     use_spot: bool = True
     spot_strategy: str = "SpotAsPriceGo"
     v_switch_id: Optional[str] = None
@@ -50,12 +85,8 @@ class EcsConfig:
     key_pair_name: str = DEFAULT_KEYPAIR
     ssh_username: str = "root"
     ssh_private_key_path: str = DEFAULT_SSH_KEY
-    conflux_git_ref: str = "v3.0.2"
-    image_prefix: str = "conflux"
     instance_name_prefix: str = "conflux-builder"
     internet_max_bandwidth_out: int = 100
-    search_all_regions: bool = False
-    cleanup_builder_instance: bool = True
     poll_interval: int = 5
     wait_timeout: int = 1800
     common_tag_key: str = DEFAULT_COMMON_TAG_KEY
@@ -72,20 +103,12 @@ def load_credentials() -> AliCredentials:
     return AliCredentials(ak, sk)
 
 
-def load_endpoint() -> Optional[str]:
-    return os.getenv("ALI_ECS_ENDPOINT", "").strip() or None
-
-
-def client(creds: AliCredentials, region: str, endpoint: Optional[str] = None) -> EcsClient:
-    if endpoint and "cloudcontrol" in endpoint:
-        endpoint = f"ecs.{region}.aliyuncs.com"
-    return EcsClient(
-        AliyunConfig(
-            access_key_id=creds.access_key_id,
-            access_key_secret=creds.access_key_secret,
-            region_id=region,
-            endpoint=endpoint,
-            read_timeout=120_000,
-            connect_timeout=120_000
-        )
+def client(creds: AliCredentials, region: str) -> EcsClient:
+    config = AliyunOpenApiConfig(
+        access_key_id=creds.access_key_id,
+        access_key_secret=creds.access_key_secret,
+        region_id=region,
+        read_timeout=120_000,
+        connect_timeout=120_000,
     )
+    return EcsClient(config)
