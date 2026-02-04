@@ -20,8 +20,8 @@ def get_vpcs_in_region(client: VpcClient) -> List[VpcInfo]:
 
     while True:
         req = vpc_models.DescribeVpcsRequest()
-        req.Offset = offset
-        req.Limit = limit
+        req.Offset = str(offset)
+        req.Limit = str(limit)
 
         resp = client.DescribeVpcs(req)
         if resp.VpcSet:

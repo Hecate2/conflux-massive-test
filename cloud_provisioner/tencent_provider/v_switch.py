@@ -33,8 +33,8 @@ def get_v_switchs_in_region(client: VpcClient, vpc_id: str) -> List[VSwitchInfo]
     while True:
         req = vpc_models.DescribeSubnetsRequest()
         req.Filters = [filter_vpc]
-        req.Offset = offset
-        req.Limit = limit
+        req.Offset = str(offset)
+        req.Limit = str(limit)
 
         resp = client.DescribeSubnets(req)
         if resp.SubnetSet:

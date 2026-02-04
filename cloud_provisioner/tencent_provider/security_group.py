@@ -19,8 +19,8 @@ def get_security_groups_in_region(client: VpcClient, vpc_id: str) -> List[Securi
 
     while True:
         req = vpc_models.DescribeSecurityGroupsRequest()
-        req.Offset = offset
-        req.Limit = limit
+        req.Offset = str(offset)
+        req.Limit = str(limit)
         resp = client.DescribeSecurityGroups(req)
 
         if resp.SecurityGroupSet:

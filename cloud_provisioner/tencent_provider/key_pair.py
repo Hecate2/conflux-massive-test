@@ -56,6 +56,7 @@ def get_keypairs_in_region(client: CvmClient, key_pair_name: str) -> Optional[Ke
 def create_keypair(client: CvmClient, key_pair: KeyPairRequestConfig):
     req = cvm_models.ImportKeyPairRequest()
     req.KeyName = key_pair.key_pair_name
+    req.ProjectId = 0
     req.PublicKey = key_pair.public_key
     client.ImportKeyPair(req)
 

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from functools import lru_cache
 import os
 from typing import List, Optional
 
@@ -41,11 +40,9 @@ class TencentClient(IEcsClient):
     def _credential(self) -> credential.Credential:
         return credential.Credential(self.secret_id, self.secret_key)
 
-    @lru_cache()
     def build_cvm(self, region_id: str) -> cvm_client.CvmClient:
         return cvm_client.CvmClient(self._credential(), region_id, _build_profile("cvm.tencentcloudapi.com"))
 
-    @lru_cache()
     def build_vpc(self, region_id: str) -> vpc_client.VpcClient:
         return vpc_client.VpcClient(self._credential(), region_id, _build_profile("vpc.tencentcloudapi.com"))
 
