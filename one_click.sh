@@ -65,5 +65,7 @@ trap - EXIT
 print_separator "步骤 3/3：开始分析日志"
 
 python -m analyzer.stat_latency -l $LOG_PATH/nodes | tee $LOG_PATH/exp_latency.log
+python -m analyzer.log_metrics -l $LOG_PATH/nodes -o $LOG_PATH/figs -m good_tps.m1 stat_unpacked_txs stat_ready_accounts
+python -m analyzer.tree_graph_parse -l $LOG_PATH/nodes -o $LOG_PATH/figs | tee $LOG_PATH/confirmation.log
 
 print_separator "测试完毕，查看 $LOG_PATH 获得更多细节"
