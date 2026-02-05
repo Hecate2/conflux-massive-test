@@ -155,8 +155,8 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     gen_success_cnt = len(gen_success_nodes)
     logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
 
-    # Phase 2: sync logs with 4 workers
-    with ThreadPoolExecutor(max_workers=4) as sync_executor:
+    # Phase 2: sync logs with 8 workers
+    with ThreadPoolExecutor(max_workers=8) as sync_executor:
         sync_results = list(sync_executor.map(_sync, gen_success_nodes))
 
     sync_failures = sum(sync_results)
