@@ -4,7 +4,7 @@ import queue
 import socket
 import time
 import threading
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 from queue import Queue
 
 from loguru import logger
