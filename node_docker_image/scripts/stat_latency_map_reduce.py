@@ -393,7 +393,7 @@ class NodeLogMapper:
 
     def map(self):
         with open(self.log_file, "r", encoding='UTF-8') as file:
-            for line in file.readlines():
+            for line in file:
                     self.parse_log_line(line)
 
     def parse_log_line(self, line:str):
