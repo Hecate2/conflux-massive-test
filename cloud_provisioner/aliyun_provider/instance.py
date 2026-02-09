@@ -38,8 +38,8 @@ def create_instances_in_zone(
     max_amount: int,
     min_amount: int,
 ) -> Tuple[list[str], CreateInstanceError]:
-    disk_size = getattr(cfg, "disk_size", 20)
-    disk_category = getattr(cfg, "disk_category", "cloud_essd")
+    disk_size = cfg.disk_size or 20
+    disk_category = cfg.disk_category or "cloud_essd"
     disk = RunInstancesRequestSystemDisk(size=str(disk_size))
     if disk_category:
         disk.category = disk_category
@@ -65,8 +65,8 @@ def create_instances_in_zone(
     if disk_size and disk_size > 0:
         req.system_disk = disk
 
-    if getattr(cfg, "use_spot", False):
-        req.spot_strategy = getattr(cfg, "spot_strategy", "SpotAsPriceGo")
+    if cfg.use_spot:
+        req.spot_strategy = cfg.spot_strategy or "SpotAsPriceGo"
 
     try:
         resp = client.run_instances(req)
