@@ -298,6 +298,17 @@ def main() -> None:
     ali = AliyunClient.load_from_env()
     raw_ecs = ali.build(region_id)
 
+    # Reuse cloud_provisioner: if an image named DEFAULT_IMAGE_NAME already exists in the target region,
+    # skip the build to avoid duplicate work.
+    try:
+        existing_images = ali.get_images_in_region(region_id, DEFAULT_IMAGE_NAME)
+        if existing_images:
+            img = existing_images[0]
+            logger.info(f"image {DEFAULT_IMAGE_NAME} already exists in {region_id}: {img.image_id} ({img.image_name}). Skipping build.")
+            return
+    except Exception as exc:
+        logger.warning(f"failed to query existing images in {region_id}: {exc}. Will continue with build")
+
     base_ubuntu = find_ubuntu(raw_ecs, region_id)
     vpc_id, security_group_id, key_pair_name, zone_ids = _ensure_shared_infra(
         ali,
@@ -316,15 +327,15 @@ def main() -> None:
         spot_strategy="SpotAsPriceGo",
     )
 
-    test_cfg = InstanceConfig(
-        user_tag_value=user_tag,
-        instance_name_prefix="conflux-registry-test",
-        disk_size=DISK_GB,
-        disk_category="cloud_essd",
-        internet_max_bandwidth_out=100,
-        use_spot=True,
-        spot_strategy="SpotAsPriceGo",
-    )
+    # test_cfg = InstanceConfig(
+    #     user_tag_value=user_tag,
+    #     instance_name_prefix="conflux-registry-test",
+    #     disk_size=DISK_GB,
+    #     disk_category="cloud_essd",
+    #     internet_max_bandwidth_out=100,
+    #     use_spot=True,
+    #     spot_strategy="SpotAsPriceGo",
+    # )
 
     # 1) Builder instance (spot ecs.xn4.small) - try zones sequentially (no instance-type querying)
     builder_type = InstanceType(BUILDER_INSTANCE_TYPE, 1)
@@ -422,5 +433,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
