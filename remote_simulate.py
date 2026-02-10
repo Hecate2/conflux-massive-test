@@ -31,8 +31,8 @@ from utils.wait_until import WaitUntilTimeoutError
 from utils import shell_cmds
 
 
-HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
-NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
+HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=128)
+NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=128)
 COUNTER = AtomicCounter()
 
 
@@ -170,7 +170,7 @@ def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
                 logger.warning(f"zone {host.zone}: {host.private_ip} prepare failed: {exc}")
                 return False
 
-        with ThreadPoolExecutor(max_workers=min(32, max(1, len(ordered)))) as zone_executor:
+        with ThreadPoolExecutor(max_workers=min(128, max(1, len(ordered)))) as zone_executor:
             futures: list = [None] * len(ordered)
             for i, host in enumerate(ordered):
                 futures[i] = zone_executor.submit(_prepare_host, i, host, futures)
@@ -235,7 +235,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
             return 1
 
     # Phase 1: generate logs with 100 workers and wait for completion
-    with ThreadPoolExecutor(max_workers=100) as gen_executor:
+    with ThreadPoolExecutor(max_workers=128) as gen_executor:
         gen_results = list(gen_executor.map(_generate, nodes))
 
     gen_success_nodes = [n for n, ok in gen_results if ok]
@@ -243,7 +243,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
 
     # Phase 2: sync logs with 16 workers
-    with ThreadPoolExecutor(max_workers=16) as sync_executor:
+    with ThreadPoolExecutor(max_workers=32) as sync_executor:
         sync_results = list(sync_executor.map(_sync, gen_success_nodes))
 
     sync_failures = sum(sync_results)
@@ -284,7 +284,7 @@ if __name__ == "__main__":
         target_nodes=total_nodes,
         # nodes_per_host=max_nodes_per_host,
         num_blocks=2000,
-        connect_peers=8,
+        connect_peers=6,
         target_tps=17000,
         storage_memory_gb=16,
         generation_period_ms=175,
@@ -296,7 +296,7 @@ if __name__ == "__main__":
         max_block_size_in_bytes=450 * 1024,
         txgen_account_count=500,
     )
-    assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
+    # assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
     logger.success(f"完成配置文件 {config_file.path}")

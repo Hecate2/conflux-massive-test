@@ -12,7 +12,7 @@ def connect_nodes(nodes: List[RemoteNode],
                     topology: NetworkTopology,
                     connection_timeout: int = 10,
                     handshake_timeout: int = 10,
-                    max_workers: int = 300,
+                    max_workers: int = 128,
                     min_peers: int = 3,
                     ):
     return NetworkConnector(nodes, topology, connection_timeout,
