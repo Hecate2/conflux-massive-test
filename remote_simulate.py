@@ -152,6 +152,9 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
 
     Path(local_path).mkdir(parents=True, exist_ok=True)
 
+    def _archive_base(host: HostSpec) -> str:
+        return "/root" if host.ssh_user == "root" else f"/home/{host.ssh_user}"
+
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
@@ -163,7 +166,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
             local_node_path = str(Path(local_path) / node.id)
             Path(local_node_path).mkdir(parents=True, exist_ok=True)
             # Download only the compressed archive created on the remote host
-            remote_archive = f"/root/output{node.index}.7z"
+            remote_archive = f"{_archive_base(node.host_spec)}/output{node.index}.7z"
             shell_cmds.rsync_download(remote_archive, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
             # Try to clean up remote archive
             # try:
