@@ -18,6 +18,6 @@ class InstanceConfig:
     disk_category: str = "cloud_essd"
     internet_max_bandwidth_out: int = 100
 
-    # Aliyun spot instances (optional)
+    # Spot instances (optional, used by Aliyun/AWS image build flows)
     use_spot: bool = False
     spot_strategy: str = "SpotAsPriceGo"
