@@ -112,6 +112,7 @@ class NetworkConnector:
         """
         node = self.nodes[node_idx]
         
+        peer_idx = 0
         try:
             # 建立所有连接
             for peer_idx, latency in peers_with_latencies:
@@ -128,7 +129,7 @@ class NetworkConnector:
 
         except Exception as e:
             logger.warning(
-                f"Node {node.id} build p2p connection error: {e}")
+                f"Node {node.id} build p2p connection error between {self.nodes[node_idx].host_spec.zone}-{self.nodes[peer_idx].host_spec.zone}: {e}")
             return False
 
     def _collect_results(
