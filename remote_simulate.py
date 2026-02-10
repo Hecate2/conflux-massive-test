@@ -3,13 +3,14 @@
 
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
-import json
+import ipaddress
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 from pathlib import Path
-from typing import List
+from collections import defaultdict
+from typing import Dict, List
 
 import requests
 from loguru import logger
@@ -106,6 +107,41 @@ def launch_remote_nodes(hosts: List[HostSpec], config_file, pull_docker_image: b
     return nodes
 
 
+def _sorted_hosts_by_private_ip(hosts: List[HostSpec]) -> List[HostSpec]:
+    def _key(h: HostSpec):
+        try:
+            return ipaddress.ip_address(h.private_ip or h.ip)
+        except ValueError:
+            return ipaddress.ip_address(h.ip)
+
+    return sorted(hosts, key=_key)
+
+
+def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
+    zones: Dict[str, List[HostSpec]] = defaultdict(list)
+    for host in hosts:
+        zones[host.zone].append(host)
+
+    def _prepare_zone(zone_hosts: List[HostSpec]) -> None:
+        ordered = _sorted_hosts_by_private_ip(zone_hosts)
+        if not ordered:
+            return
+        for idx, host in enumerate(ordered):
+            if idx == 0:
+                logger.info(f"zone {host.zone}: seed {host.private_ip} pulls from dockerhub")
+                shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
+            else:
+                parent = ordered[(idx - 1) // 2]
+                registry_host = parent.private_ip or parent.ip
+                logger.info(f"zone {host.zone}: {host.private_ip} pulls from {registry_host}")
+                shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_registry_and_push_local(registry_host))
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(zones)))) as executor:
+        futures = [executor.submit(_prepare_zone, zone_hosts) for zone_hosts in zones.values()]
+        for f in futures:
+            f.result()
+
+
 def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
@@ -120,7 +156,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
             shell_cmds.scp(str(script_local), node.host_spec.ip, node.host_spec.ssh_user, remote_script)
-            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["sudo", "bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
             shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
@@ -130,10 +166,10 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
             remote_archive = f"/root/output{node.index}.7z"
             shell_cmds.rsync_download(remote_archive, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
             # Try to clean up remote archive
-            try:
-                shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_archive])
-            except Exception:
-                logger.debug(f"无法删除远程归档 {remote_archive}")
+            # try:
+            #     shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_archive])
+            # except Exception:
+            #     logger.debug(f"无法删除远程归档 {remote_archive}")
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
             return 0
@@ -194,7 +230,10 @@ if __name__ == "__main__":
     log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
-    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=True)
+    logger.info("准备分区内镜像拉取 (dockerhub -> zone tree -> local registry)")
+    _prepare_images_by_zone(hosts)
+
+    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=False)
     if len(nodes) < simulation_config.target_nodes:
         # raise RuntimeError("Not all nodes started")
         logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
