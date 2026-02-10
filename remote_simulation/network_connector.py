@@ -10,8 +10,8 @@ from utils.wait_until import wait_until
 
 def connect_nodes(nodes: List[RemoteNode],
                     topology: NetworkTopology,
-                    connection_timeout: int = 120,
-                    handshake_timeout: int = 120,
+                    connection_timeout: int = 10,
+                    handshake_timeout: int = 10,
                     max_workers: int = 300,
                     min_peers: int = 3,
                     ):

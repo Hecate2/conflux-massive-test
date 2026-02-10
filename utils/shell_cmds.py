@@ -18,8 +18,8 @@ def scp(
     user: str = "ubuntu",
     remote_path: str = "~",
     *,
-    max_retries: int = 3,
-    retry_delay: int = 15,
+    max_retries: int = 15,
+    retry_delay: int = 3,
 ):
     scp_cmd = [
         'scp',
@@ -60,7 +60,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
     # Python 层面实现重试
     for attempt in range(max_retries):
         try:
-            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=20)
+            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=60)
             # logger.debug(f"rsync completed: {completed.stdout}")
             return  # 成功则返回
         except subprocess.CalledProcessError as e:
@@ -85,7 +85,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
             # print(f"Timeout on attempt {attempt + 1}, retrying...")
 
 
-def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None = None, *, max_retries: int = 3, retry_delay: int = 15):
+def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None = None, *, max_retries: int = 15, retry_delay: int = 3):
     if command is None:
         return
     
