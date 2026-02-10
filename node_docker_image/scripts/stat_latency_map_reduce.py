@@ -8,6 +8,51 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+
+def _load_json_from_7z_member(archive_path: str, member_suffix: str):
+    try:
+        import py7zr  # type: ignore
+        import py7zr.exceptions
+    except Exception as e:
+        raise RuntimeError(
+            "Reading .7z logs requires 'py7zr'. Install it (e.g. pip install py7zr) or use uncompressed logs."
+        ) from e
+
+    try:
+        with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+            names = archive.getnames()
+            candidates = [n for n in names if n.endswith(member_suffix)]
+            if not candidates:
+                print(
+                    f"Warning: skip .7z archive without '{member_suffix}': {archive_path}",
+                    file=sys.stderr,
+                )
+                return None
+
+            # Prefer the shortest path (e.g. 'blocks.log' over 'output0/blocks.log')
+            candidates.sort(key=lambda n: (len(n), n))
+            target = candidates[0]
+            data = archive.read([target])
+            if data is None:
+                print(
+                    f"Warning: failed to read '{target}' from .7z archive: {archive_path}",
+                    file=sys.stderr,
+                )
+                return None
+            bio = data[target]  # type: ignore[index]
+            raw = bio.read()
+
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+        return json.loads(raw.decode("utf-8"))
+    except py7zr.exceptions.Bad7zFile as e:
+        print(f"Warning: skip bad .7z archive: {archive_path} ({e})", file=sys.stderr)
+        return None
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"Warning: skip unreadable .7z archive: {archive_path} ({e})", file=sys.stderr)
+        return None
+
+
 def parse_value(log_line:str, prefix:str, suffix:str):
     start = 0 if prefix is None else log_line.index(prefix) + len(prefix)
     end = len(log_line) if suffix is None else log_line.index(suffix, start)
@@ -349,6 +394,10 @@ class Percentile(enum.Enum):
 class Statistics:
     def __init__(self, data:list, avg_ndigits=2, sort=True):
         if data is None or len(data) == 0:
+            # Keep the object usable even with no samples.
+            # Count is 0; percentiles are NaN so callers can still format numbers.
+            for p in Percentile:
+                self.__dict__[p.name] = 0 if p is Percentile.Cnt else float("nan")
             return
 
         if sort:
@@ -690,16 +739,47 @@ class LogAggregator:
 
         futures = []
         for (path, _, files) in os.walk(logs_dir):
-            for f in files:
-                if f == "blocks.log":
-                    log_file = os.path.join(path, f)
-                    futures.append(executor.submit(HostLogReducer.loadf, log_file))
+            has_blocks_log = "blocks.log" in files
+            if has_blocks_log:
+                log_file = os.path.join(path, "blocks.log")
+                futures.append(executor.submit(HostLogReducer.loadf, log_file))
+
+            # Newer layout: output*.7z per host dir, containing e.g. output0/blocks.log
+            # If an uncompressed blocks.log exists in the same directory, prefer it to avoid double counting.
+            if not has_blocks_log:
+                for f in files:
+                    if f.endswith(".7z"):
+                        archive_path = os.path.join(path, f)
+
+                        def _load_host_from_archive(p=archive_path):
+                            data = _load_json_from_7z_member(p, "blocks.log")
+                            if not data:
+                                return None
+                            try:
+                                return HostLogReducer.load(data)
+                            except Exception as e:
+                                print(
+                                    f"Warning: skip .7z archive with invalid blocks.log JSON: {p} ({e})",
+                                    file=sys.stderr,
+                                )
+                                return None
+
+                        futures.append(executor.submit(_load_host_from_archive))
 
         # process host reducers as they complete to reduce peak memory
+        host_count = 0
         for future in as_completed(futures):
             host = future.result()
+            if host is None:
+                continue
             agg.add_host(host)
+            host_count += 1
             del host
+
+        if host_count == 0:
+            raise RuntimeError(
+                f"No host logs found under: {logs_dir}. Expected 'blocks.log' files or '.7z' archives containing 'blocks.log'."
+            )
 
         agg.validate()
         agg.generate_latency_stat()

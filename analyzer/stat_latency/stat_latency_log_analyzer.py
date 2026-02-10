@@ -163,8 +163,13 @@ class LogAnalyzer:
 
         tx_sum = sum(block_txs_list)
         print("{} txs generated".format(tx_sum))
-        print("Test duration is {:.2f} seconds".format(max_time - min_time))
-        print("Throughput is {}".format(tx_sum / (max_time - min_time)))
+        duration = max_time - min_time
+        if duration <= 0:
+            print("Test duration is 0.00 seconds")
+            print("Throughput is N/A (duration is 0)")
+        else:
+            print("Test duration is {:.2f} seconds".format(duration))
+            print("Throughput is {}".format(tx_sum / duration))
         slowest_tx_latency = self.agg.get_largest_min_tx_packed_latency_hash()
         if slowest_tx_latency is not None:
             print("Slowest packed transaction hash: {}".format(slowest_tx_latency))
