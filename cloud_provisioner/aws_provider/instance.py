@@ -119,7 +119,9 @@ def describe_instance_status(client: EC2Client, instance_ids: List[str]):
                 status = instance['State']['Name']
                 
                 if status == 'running':
-                    running_instances[instance_id] = instance['PublicIpAddress']
+                    public_ip = instance['PublicIpAddress']
+                    private_ip = instance['PrivateIpAddress']
+                    running_instances[instance_id] = (public_ip, private_ip)
                 elif status in ['pending', 'stopped']:
                     pending_instances.add(instance_id)
         
