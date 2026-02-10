@@ -18,3 +18,20 @@ docker run --rm --name "${CONTAINER}_collect" \
   -w /root \
   "$IMAGE_TAG" \
   /bin/bash -c "./collect_logs.sh"
+
+# Compress output directory into a 7z archive (max compression). Prefer '7zz' if available.
+ARCHIVE="/root/output${INDEX}.7z"
+if command -v 7zz >/dev/null 2>&1; then
+  7zz a -t7z -mx=9 "$ARCHIVE" "/root/output${INDEX}"
+elif command -v 7z >/dev/null 2>&1; then
+  7z a -t7z -mx=9 "$ARCHIVE" "/root/output${INDEX}"
+else
+  echo "Warning: 7z not available, skipping compression" >&2
+fi
+# Remove uncompressed output to save space only if the archive was successfully created
+# if [ -s "${ARCHIVE}" ]; then
+#   rm -rf "/root/output${INDEX}"
+# else
+#   echo "Warning: Archive ${ARCHIVE} missing or empty; keeping /root/output${INDEX}" >&2
+# fi
+

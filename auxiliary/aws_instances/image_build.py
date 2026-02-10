@@ -195,7 +195,8 @@ def _wait_for_instances(aws: AwsClient, *, region_id: str, zone_id: str, instanc
     try:
         wait_until(lambda: verifier.ready_nodes >= len(instance_ids), timeout=wait_timeout, retry_interval=3)
         ready = verifier.copy_ready_instances()
-        return [ip for _, ip in ready]
+        ips: list[str] = [public_ip for _, public_ip, _ in ready]
+        return ips
     finally:
         verifier.stop()
         t1.join(timeout=5)
@@ -234,6 +235,21 @@ async def _wait_registry_ready(host: str, *, ssh_user: str, ssh_key_path: str, t
                 return
             await asyncio.sleep(3)
     raise RuntimeError("registry not ready on builder within timeout")
+
+
+def _wait_instance_state(ec2, *, instance_id: str, want: set[str], timeout: int = 600, poll: int = 5) -> str:
+    deadline = time.time() + timeout
+    last_state = ""
+    while time.time() < deadline:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        reservations = resp.get("Reservations", [])
+        instances = reservations[0].get("Instances", []) if reservations else []
+        if instances:
+            last_state = instances[0].get("State", {}).get("Name", "")
+            if last_state in want:
+                return last_state
+        time.sleep(poll)
+    raise RuntimeError(f"instance {instance_id} not in {want} within timeout; last_state={last_state}")
 
 
 def main() -> None:
@@ -314,16 +330,24 @@ def main() -> None:
         chosen_zone = zone_info
         logger.info(f"builder instance in zone {zone_id}: {builder_id}")
         try:
-            builder_ip = _wait_for_instances(
+            builder_ips = _wait_for_instances(
                 aws,
                 region_id=region_id,
                 zone_id=zone_id,
                 instance_type=builder_type,
                 instance_ids=[builder_id],
                 wait_timeout=1800,
-            )[0]
+            )
+            if not builder_ips:
+                raise RuntimeError("instance ready but no IP returned")
+            builder_ip = builder_ips[0]
             break
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"builder not ready in zone {zone_id}: {exc}. Waiting before delete.")
+            try:
+                _wait_instance_state(raw_ec2, instance_id=builder_id, want={"running", "stopped"}, timeout=600)
+            except Exception as wait_exc:
+                logger.warning(f"failed to wait for instance {builder_id} before delete: {wait_exc}")
             aws.delete_instances(region_id, [builder_id])
             builder_id = None
             builder_ip = None

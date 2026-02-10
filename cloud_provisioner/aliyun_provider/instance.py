@@ -40,7 +40,9 @@ def create_instances_in_zone(
     min_amount: int,
 ) -> Tuple[list[str], CreateInstanceError]:
     disk_size = cfg.disk_size or 20
-    disk_category = cfg.disk_category or "cloud_essd"
+    # Treat empty string as 'unspecified' so some instance types that don't support a forced
+    # disk category (e.g., ecs.xn4.small) can be created by letting the cloud pick the default.
+    disk_category = cfg.disk_category if cfg.disk_category not in (None, "") else None
     disk = RunInstancesRequestSystemDisk(size=str(disk_size))
     if disk_category:
         disk.category = disk_category

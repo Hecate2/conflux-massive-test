@@ -219,7 +219,8 @@ def _wait_for_instances(ali: AliyunClient, *, region_id: str, zone_id: str, inst
     try:
         wait_until(lambda: verifier.ready_nodes >= len(instance_ids), timeout=wait_timeout, retry_interval=3)
         ready = verifier.copy_ready_instances()
-        return [ip for _, ip in ready]
+        ips: list[str] = [public_ip for _, public_ip, _ in ready]
+        return ips
     finally:
         verifier.stop()
         t1.join(timeout=5)
@@ -235,6 +236,19 @@ async def _prepare_registry_builder(host: str, *, ssh_user: str, ssh_key_path: s
         await asyncssh.scp(str(PREPARE_SCRIPT), (conn, remote_prepare))
         await _remote_run(conn, f"sudo bash {shlex.quote(remote_prepare)}")
         await _remote_run(conn, f"sudo rm -f {shlex.quote(remote_prepare)}")
+
+
+async def _wait_registry_ready(host: str, *, ssh_user: str, ssh_key_path: str, timeout: int = 300) -> None:
+    """Wait until the registry on the builder responds to /v2/ (like the AWS flow)."""
+    conn = await _connect_with_retry(host, ssh_user=ssh_user, ssh_key_path=ssh_key_path, timeout=timeout)
+    async with conn:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            r = await conn.run("curl -fsS http://localhost:5000/v2/ >/dev/null", check=False)
+            if r.exit_status == 0:
+                return
+            await asyncio.sleep(3)
+    raise RuntimeError("registry not ready on builder within timeout")
 
 
 def _stop_instance(raw_ecs, *, instance_id: str) -> None:
@@ -347,16 +361,31 @@ def main() -> None:
         chosen_zone = zone_info
         logger.info(f"builder instance in zone {zone_id}: {builder_id}")
         try:
-            builder_ip = _wait_for_instances(
+            builder_ips = _wait_for_instances(
                 ali,
                 region_id=region_id,
                 zone_id=zone_id,
                 instance_type=builder_type,
                 instance_ids=[builder_id],
                 wait_timeout=1800,
-            )[0]
+            )
+            if not builder_ips:
+                raise RuntimeError("instance ready but no IP returned")
+            builder_ip = builder_ips[0]
             break
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"builder not ready in zone {zone_id}: {exc}. Waiting before delete.")
+            try:
+                _wait_status(
+                    raw_ecs,
+                    region_id=region_id,
+                    instance_id=builder_id,
+                    want={"Running", "Stopped"},
+                    poll=5,
+                    timeout=600,
+                )
+            except Exception as wait_exc:
+                logger.warning(f"failed to wait for instance {builder_id} before delete: {wait_exc}")
             ali.delete_instances(region_id, [builder_id])
             builder_id = None
             builder_ip = None
@@ -370,6 +399,8 @@ def main() -> None:
         logger.success(f"builder ready: {builder_ip}")
 
         asyncio.run(_prepare_registry_builder(builder_ip, ssh_user=ssh_user, ssh_key_path=ssh_key_path))
+        # Wait until the registry is ready to serve /v2/ before proceeding
+        asyncio.run(_wait_registry_ready(builder_ip, ssh_user=ssh_user, ssh_key_path=ssh_key_path, timeout=300))
 
         # 2) Verification instances (2 spot ecs.g8i.large) pulling from builder registry
         # test_type = InstanceType(TEST_INSTANCE_TYPE, 1)

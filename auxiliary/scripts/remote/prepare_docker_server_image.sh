@@ -2,7 +2,13 @@
 set -euo pipefail
 
 apt-get update -y
-apt-get install -y docker.io ca-certificates curl
+apt-get install -y docker.io ca-certificates curl p7zip-full
+# Ensure '7zz' command is available (some distributions provide '7z' only)
+if ! command -v 7zz >/dev/null 2>&1; then
+  if command -v 7z >/dev/null 2>&1; then
+    ln -sf /usr/bin/7z /usr/bin/7zz || true
+  fi
+fi
 systemctl enable --now docker
 
 # Private registry (insecure HTTP on :5000)

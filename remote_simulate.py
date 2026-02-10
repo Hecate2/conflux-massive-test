@@ -126,12 +126,14 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
             local_node_path = str(Path(local_path) / node.id)
             Path(local_node_path).mkdir(parents=True, exist_ok=True)
-            shell_cmds.rsync_download(
-                f"/root/output{node.index}/",
-                local_node_path,
-                node.host_spec.ip,
-                user=node.host_spec.ssh_user,
-            )
+            # Download only the compressed archive created on the remote host
+            remote_archive = f"/root/output{node.index}.7z"
+            shell_cmds.rsync_download(remote_archive, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
+            # Try to clean up remote archive
+            try:
+                shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_archive])
+            except Exception:
+                logger.debug(f"无法删除远程归档 {remote_archive}")
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
             return 0
