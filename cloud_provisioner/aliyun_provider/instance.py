@@ -3,6 +3,7 @@
 import json
 import time
 import traceback
+import inspect
 from typing import List, Tuple
 
 from alibabacloud_ecs20140526.models import DescribeInstancesRequest, RunInstancesRequestTag, RunInstancesRequestSystemDisk, RunInstancesRequest, DescribeInstancesResponseBodyInstancesInstance, DeleteInstancesRequest
@@ -45,7 +46,8 @@ def create_instances_in_zone(
         disk.category = disk_category
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
         
-    req = RunInstancesRequest(
+    # First try spot instances (aggressive pricing); if not enough or fails, fallback to NoSpot for the remaining
+    req_spot = RunInstancesRequest(
         region_id=region_info.id,
         zone_id=zone_info.id,
         image_id=region_info.image_id,
@@ -60,35 +62,35 @@ def create_instances_in_zone(
         tag=_instance_tags(cfg),
         amount=max_amount,
         min_amount=min_amount,
+        system_disk=disk,
+        spot_strategy="SpotAsPriceGo",
     )
 
     if disk_size and disk_size > 0:
-        req.system_disk = disk
+        req_spot.system_disk = disk
 
     if cfg.use_spot:
-        req.spot_strategy = cfg.spot_strategy or "SpotAsPriceGo"
+        req_spot.spot_strategy = cfg.spot_strategy or "SpotAsPriceGo"
+
+    spot_ids = []
+    spot_error_type = CreateInstanceError.Others
 
     try:
-        resp = client.run_instances(req)
-        ids = resp.body.instance_id_sets.instance_id_set
-        assert ids is not None
-        logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
-        # ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
-        return ids, CreateInstanceError.Nil
+        resp = client.run_instances(req_spot)
+        spot_ids = resp.body.instance_id_sets.instance_id_set or []
+        assert spot_ids is not None
+        logger.success(f"Create instances (spot) at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(spot_ids)}, ids={spot_ids}")
     except Exception as exc:
         code = getattr(exc, "code", None)
-        error_type = CreateInstanceError.Others
-        
+        spot_error_type = CreateInstanceError.Others
         if code == "OperationDenied.NoStock":
-            error_type = CreateInstanceError.NoStock
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
-        
+            spot_error_type = CreateInstanceError.NoStock
+            logger.warning(f"No spot stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req_spot.min_amount}~{req_spot.amount}")
         elif code == "InvalidResourceType.NotSupported":
-            error_type = CreateInstanceError.NoInstanceType
-            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
-        
+            spot_error_type = CreateInstanceError.NoInstanceType
+            logger.warning(f"Spot not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req_spot.min_amount}~{req_spot.amount}")
         else:
-            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(f"spot run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
             if code == "InvalidSystemDiskCategory.ValueNotSupported":
                 try:
                     payload = req.to_map() if hasattr(req, "to_map") else {}
@@ -96,9 +98,85 @@ def create_instances_in_zone(
                 except Exception:
                     pass
             logger.error(traceback.format_exc())
-        
-        return [], error_type
-    
+
+    # If spot created all requested instances, return success
+    if len(spot_ids) == max_amount:
+        return spot_ids, CreateInstanceError.Nil
+
+    # Otherwise try to create remaining instances as NoSpot
+    remaining = max_amount - len(spot_ids)
+    if remaining <= 0:
+        # Shouldn't happen, but guard anyway
+        return spot_ids, CreateInstanceError.Nil
+
+    # Compute min_amount required for fallback so that overall min_amount is satisfied
+    needed_min_for_fallback = max(min_amount - len(spot_ids), 0)
+
+    # Build a single NoSpot request object and set min_amount attribute when needed
+    req_nospot = RunInstancesRequest(
+        region_id=region_info.id,
+        zone_id=zone_info.id,
+        image_id=region_info.image_id,
+        instance_type=instance_type.name,
+        security_group_id=region_info.security_group_id,
+        v_switch_id=zone_info.v_switch_id,
+        key_pair_name=region_info.key_pair_name,
+        instance_name=name,
+        internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
+        internet_charge_type="PayByTraffic",
+        instance_charge_type="PostPaid",
+        tag=_instance_tags(cfg),
+        amount=remaining,
+        system_disk=disk,
+        spot_strategy="NoSpot",
+    )
+
+    if needed_min_for_fallback > 0:
+        # Set attribute after construction to avoid duplicating constructor calls
+        req_nospot.min_amount = needed_min_for_fallback
+
+    nospot_ids = []
+    nospot_error_type = CreateInstanceError.Others
+
+    try:
+        resp = client.run_instances(req_nospot)
+        nospot_ids = resp.body.instance_id_sets.instance_id_set or []
+        assert nospot_ids is not None
+        logger.success(f"Create instances (nospot) at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(nospot_ids)}, ids={nospot_ids}")
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        nospot_error_type = CreateInstanceError.Others
+        if code == "OperationDenied.NoStock":
+            nospot_error_type = CreateInstanceError.NoStock
+            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={getattr(req_nospot, 'min_amount', 0)}~{getattr(req_nospot, 'amount', remaining)}")
+        elif code == "InvalidResourceType.NotSupported":
+            nospot_error_type = CreateInstanceError.NoInstanceType
+            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={getattr(req_nospot, 'min_amount', 0)}~{getattr(req_nospot, 'amount', remaining)}")
+        else:
+            logger.error(f"nospot run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(traceback.format_exc())
+
+    total_ids = (spot_ids or []) + (nospot_ids or [])
+
+    if len(total_ids) > 0:
+        if len(total_ids) < max_amount:
+            logger.warning(f"Partially created instances at {region_info.id}/{zone_info.id}: requested={max_amount}, actual={len(total_ids)}")
+        return total_ids, CreateInstanceError.Nil
+
+    # If no instances were created, prefer the error from nospot if it ran, otherwise use spot error
+    final_error = nospot_error_type if nospot_ids == [] else CreateInstanceError.Others
+    if nospot_ids == [] and spot_ids == []:
+        # choose the more specific error if available
+        if nospot_error_type != CreateInstanceError.Others:
+            final_error = nospot_error_type
+        else:
+            final_error = spot_error_type
+
+    return [], final_error
+
+# Save the count of lines of code for this function
+CREATE_INSTANCES_IN_ZONE_LOC = len(inspect.getsource(create_instances_in_zone).splitlines())
+
 def describe_instance_status(client: Client, region_id: str, instance_ids: List[str]):
     running_instances = dict()
     pending_instances = set()
