@@ -135,7 +135,7 @@ def create_instances_in_zone(
     remaining = max_amount
     last_error = CreateInstanceError.Others
     while remaining > 0:
-        chunk_max = min(100, remaining)
+        chunk_max = min(500, remaining)
         remaining_min = max(min_amount - len(all_ids), 0)
         chunk_min = min(remaining_min, chunk_max)
         if chunk_min <= 0:

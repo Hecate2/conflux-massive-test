@@ -1,6 +1,6 @@
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
 import sys
 import threading
@@ -54,22 +54,146 @@ def create_instances_in_multi_region(client: IEcsClient, cloud_config: CloudConf
     instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
     instance_types = [InstanceType(i.name, i.nodes)
                       for i in cloud_config.instance_types]
-    regions = filter(lambda reg: reg.count>0, cloud_config.regions)
+    regions = [reg for reg in cloud_config.regions if reg.count > 0]
+
+    def _count_nodes(hosts):
+        return sum(h.nodes_per_host for h in hosts)
 
     def _create_in_region(provision_config: ProvisionRegionConfig):
         region_id = provision_config.name
-        return create_instances_in_region(client, 
-                                          instance_config, 
-                                          provision_config,
-                                          region_info=infra_provider.get_region(region_id), 
-                                          instance_types=instance_types, 
-                                          ssh_user=cloud_config.default_user_name, 
-                                          provider=cloud_config.provider)
+        return create_instances_in_region(
+            client,
+            instance_config,
+            provision_config,
+            region_info=infra_provider.get_region(region_id),
+            instance_types=instance_types,
+            ssh_user=cloud_config.default_user_name,
+            provider=cloud_config.provider,
+        )
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(_create_in_region, regions))
-        hosts = list(chain.from_iterable(results))
+    target_total_nodes = cloud_config.total_nodes
 
+    region_results = []
+    max_workers = min(20, max(1, len(regions)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_create_in_region, reg): reg for reg in regions}
+        for future in as_completed(futures):
+            reg = futures[future]
+            try:
+                hosts = future.result()
+                region_results.append({
+                    "region": reg.name,
+                    "requested_nodes": reg.count,
+                    "hosts": hosts,
+                    "actual_nodes": _count_nodes(hosts),
+                    "error": None,
+                    "provision_config": reg,
+                })
+            except Exception as exc:
+                logger.error(f"Region {reg.name} create_instances failed: {exc}")
+                logger.error(traceback.format_exc())
+                region_results.append({
+                    "region": reg.name,
+                    "requested_nodes": reg.count,
+                    "hosts": [],
+                    "actual_nodes": 0,
+                    "error": exc,
+                    "provision_config": reg,
+                })
+
+    hosts = list(chain.from_iterable(r["hosts"] for r in region_results))
+    total_nodes = _count_nodes(hosts)
+    shortfall = target_total_nodes - total_nodes
+
+    underfilled = [
+        r for r in region_results
+        if r["actual_nodes"] < r["requested_nodes"]
+    ]
+    if underfilled:
+        details = ", ".join(
+            f"{r['region']}({r['actual_nodes']}/{r['requested_nodes']})" + ("[error]" if r["error"] is not None else "")
+            for r in underfilled
+        )
+        logger.warning(f"Regions under target: {details}")
+
+    if shortfall <= 0:
+        logger.success(f"Multi-region launch complete: target_nodes={target_total_nodes}, actual_nodes={total_nodes}")
+        return hosts
+
+    healthy_regions = [
+        r for r in region_results
+        if r["error"] is None and r["actual_nodes"] >= r["requested_nodes"]
+    ]
+    if not healthy_regions:
+        logger.error(
+            f"Cannot meet total nodes: target_nodes={target_total_nodes}, actual_nodes={total_nodes}, shortfall={shortfall}. "
+            f"No healthy regions available for backfill."
+        )
+        return hosts
+
+    logger.warning(
+        f"Total nodes shortfall={shortfall}; backfilling in healthy regions: "
+        f"{[r['region'] for r in healthy_regions]}"
+    )
+
+    # Backfill loop: distribute remaining nodes across healthy regions.
+    # Stop if an iteration makes no progress.
+    max_backfill_workers = min(20, len(healthy_regions))
+    while shortfall > 0 and healthy_regions:
+        n = len(healthy_regions)
+        base = shortfall // n
+        rem = shortfall % n
+
+        with ThreadPoolExecutor(max_workers=max_backfill_workers) as executor:
+            backfill_futures = {}
+            for i, r in enumerate(healthy_regions):
+                req_nodes = base + (1 if i < rem else 0)
+                if req_nodes <= 0:
+                    continue
+                reg_cfg: ProvisionRegionConfig = r["provision_config"].model_copy(update={"count": int(req_nodes)})
+                backfill_futures[executor.submit(_create_in_region, reg_cfg)] = (r, req_nodes)
+
+            if not backfill_futures:
+                break
+
+            progressed_nodes = 0
+            newly_unhealthy = set()
+            for future in as_completed(backfill_futures):
+                r, req_nodes = backfill_futures[future]
+                region_id = r["region"]
+                try:
+                    extra_hosts = future.result()
+                    added_nodes = _count_nodes(extra_hosts)
+                    if added_nodes <= 0:
+                        logger.warning(f"Backfill made no progress in region {region_id} (requested_nodes={req_nodes})")
+                        newly_unhealthy.add(region_id)
+                        continue
+
+                    hosts.extend(extra_hosts)
+                    progressed_nodes += added_nodes
+                    logger.success(
+                        f"Backfill success in region {region_id}: requested_nodes={req_nodes}, added_nodes={added_nodes}"
+                    )
+                except Exception as exc:
+                    logger.error(f"Backfill failed in region {region_id}: {exc}")
+                    logger.error(traceback.format_exc())
+                    newly_unhealthy.add(region_id)
+
+        if progressed_nodes <= 0:
+            logger.error(
+                f"Backfill stalled: still shortfall={shortfall}, no further progress possible with current healthy regions."
+            )
+            break
+
+        shortfall = max(0, shortfall - progressed_nodes)
+        if newly_unhealthy:
+            healthy_regions = [r for r in healthy_regions if r["region"] not in newly_unhealthy]
+
+    final_nodes = _count_nodes(hosts)
+    if final_nodes >= target_total_nodes:
+        logger.success(f"Multi-region launch complete after backfill: target_nodes={target_total_nodes}, actual_nodes={final_nodes}")
+    else:
+        logger.error(f"Multi-region launch incomplete: target_nodes={target_total_nodes}, actual_nodes={final_nodes}")
     return hosts
 
 
