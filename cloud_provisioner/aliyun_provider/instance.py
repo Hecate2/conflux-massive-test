@@ -37,8 +37,12 @@ def create_instances_in_zone(
     instance_type: InstanceType,
     max_amount: int,
     min_amount: int,
-) -> Tuple[list[str], CreateInstanceError]:    
-    disk = RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
+) -> Tuple[list[str], CreateInstanceError]:
+    disk_size = cfg.disk_size or 20
+    disk_category = cfg.disk_category or "cloud_essd"
+    disk = RunInstancesRequestSystemDisk(size=str(disk_size))
+    if disk_category:
+        disk.category = disk_category
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
         
     req = RunInstancesRequest(
@@ -56,8 +60,13 @@ def create_instances_in_zone(
         tag=_instance_tags(cfg),
         amount=max_amount,
         min_amount=min_amount,
-        system_disk=disk,
     )
+
+    if disk_size and disk_size > 0:
+        req.system_disk = disk
+
+    if cfg.use_spot:
+        req.spot_strategy = cfg.spot_strategy or "SpotAsPriceGo"
 
     try:
         resp = client.run_instances(req)
@@ -80,6 +89,12 @@ def create_instances_in_zone(
         
         else:
             logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            if code == "InvalidSystemDiskCategory.ValueNotSupported":
+                try:
+                    payload = req.to_map() if hasattr(req, "to_map") else {}
+                    logger.error(f"debug SystemDisk payload: {payload.get('SystemDisk')}")
+                except Exception:
+                    pass
             logger.error(traceback.format_exc())
         
         return [], error_type
