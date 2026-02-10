@@ -137,7 +137,7 @@ def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
                 logger.info(f"zone {host.zone}: {host.private_ip} pulls from {registry_host}")
                 shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_registry_and_push_local(registry_host))
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(zones)))) as executor:
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(zones)))) as executor:
         futures = [executor.submit(_prepare_zone, zone_hosts) for zone_hosts in zones.values()]
         for f in futures:
             f.result()
