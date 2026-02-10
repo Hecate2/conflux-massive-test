@@ -9,6 +9,7 @@ from pathlib import Path
 import json
 from loguru import logger
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 
 def load_hosts(path: Path):
@@ -83,40 +84,74 @@ def main():
     target_base = Path(args.target)
     target_base.mkdir(parents=True, exist_ok=True)
 
-    for i_host, host in enumerate(hosts):
-        ip = host.get('ip')
-        nodes_per_host = int(host.get('nodes_per_host', 1))
-        ssh_user = host.get('ssh_user') or args.user
+    def _log_base(ssh_user: str) -> str:
+        return "/root" if ssh_user == "root" else f"/home/{ssh_user}"
 
-        for idx in range(nodes_per_host):
-            remote = f"/root/output{idx}.7z"
-            local = target_base / f"{ip}-{idx}"
-            local.mkdir(parents=True, exist_ok=True)
-            logger.info(f"{i_host}: Downloading archive from {ip}:{remote} -> {local}")
-            try:
-                # prefer using host-specific key if available
-                key_path = host.get('ssh_key_path') if isinstance(host, dict) else None
-                rsync_download_cli(remote, str(local), ip, user=ssh_user, key_path=key_path)
-            except Exception as e:
-                logger.warning(f"Failed to download logs from {ip} (node {idx}): {e}")
+    def _download_with_fallback(ip: str, ssh_user: str, key_path: str | None, remote_archive: str, remote_dir: str, local: Path, i_host: int, idx: int) -> None:
+        logger.info(f"{i_host}: Downloading archive from {ip}:{remote_archive} -> {local}")
+        try:
+            rsync_download_cli(remote_archive, str(local), ip, user=ssh_user, key_path=key_path)
+            return
+        except Exception as e:
+            logger.warning(f"Archive download failed for {ip} (node {idx}): {e}")
+
+        logger.info(f"{i_host}: Falling back to legacy logs from {ip}:{remote_dir} -> {local}")
+        try:
+            rsync_download_cli(remote_dir, str(local), ip, user=ssh_user, key_path=key_path)
+        except Exception as e:
+            logger.warning(f"Legacy log download failed for {ip} (node {idx}): {e}")
+
+    def _download_archive(i_host: int, host: dict, idx: int) -> None:
+        ip = host.get('ip')
+        ssh_user = host.get('ssh_user') or args.user
+        base_dir = _log_base(ssh_user)
+        remote = f"{base_dir}/output{idx}.7z"
+        remote_dir = f"{base_dir}/output{idx}"
+        local = target_base / f"{ip}-{idx}"
+        local.mkdir(parents=True, exist_ok=True)
+        # prefer using host-specific key if available
+        key_path = host.get('ssh_key_path') if isinstance(host, dict) else None
+        _download_with_fallback(ip, ssh_user, key_path, remote, remote_dir, local, i_host, idx)
+
+    download_tasks = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        for i_host, host in enumerate(hosts):
+            ip = host.get('ip')
+            nodes_per_host = int(host.get('nodes_per_host', 1))
+            if not ip:
+                logger.warning(f"Host {i_host} missing ip, skipping")
+                continue
+            for idx in range(nodes_per_host):
+                download_tasks.append(executor.submit(_download_archive, i_host, host, idx))
+        for task in download_tasks:
+            task.result()
 
     # Retry missing files (blocks.log absent or empty)
-    for i, host in enumerate(hosts):
+    def _retry_missing(i_host: int, host: dict, idx: int) -> None:
         ip = host.get('ip')
-        nodes_per_host = int(host.get('nodes_per_host', 1))
         ssh_user = host.get('ssh_user') or args.user
         key_path = host.get('ssh_key_path')
+        local = target_base / f"{ip}-{idx}"
+        archive_file = local / f"output{idx}.7z"
+        if not archive_file.exists() or archive_file.stat().st_size == 0:
+            base_dir = _log_base(ssh_user)
+            remote = f"{base_dir}/output{idx}.7z"
+            remote_dir = f"{base_dir}/output{idx}"
+            logger.info(f"Retrying download from {ip}:{remote} -> {local}")
+            _download_with_fallback(ip, ssh_user, key_path, remote, remote_dir, local, i_host, idx)
 
-        for idx in range(nodes_per_host):
-            local = target_base / f"{ip}-{idx}"
-            archive_file = local / f"output{idx}.7z"
-            if not archive_file.exists() or archive_file.stat().st_size == 0:
-                remote = f"/root/output{idx}.7z"
-                logger.info(f"Retrying download from {ip}:{remote} -> {local}")
-                try:
-                    rsync_download_cli(remote, str(local), ip, user=ssh_user, key_path=key_path, max_retries=3)
-                except Exception as e:
-                    logger.warning(f"Retry failed for {ip} (node {idx}): {e}")
+    retry_tasks = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        for i, host in enumerate(hosts):
+            ip = host.get('ip')
+            nodes_per_host = int(host.get('nodes_per_host', 1))
+            if not ip:
+                logger.warning(f"Host {i} missing ip, skipping retry")
+                continue
+            for idx in range(nodes_per_host):
+                retry_tasks.append(executor.submit(_retry_missing, i, host, idx))
+        for task in retry_tasks:
+            task.result()
 
     logger.success("Download finished")
 
