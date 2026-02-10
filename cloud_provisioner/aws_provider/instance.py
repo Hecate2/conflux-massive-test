@@ -54,8 +54,11 @@ def create_instances_in_zone(
         if cfg.use_spot:
             instance_market_options = {"MarketType": "spot"}
 
+        # Pre-initialize values used in both try and except blocks so
+        # exception handlers can reference them safely for logging and retry.
+        request_min = max(1, single_min)
+        params = {}
         try:
-            request_min = max(1, single_min)
             params = {
                 "ImageId": region_info.image_id,
                 "MinCount": request_min,

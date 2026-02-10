@@ -127,15 +127,61 @@ def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
         ordered = _sorted_hosts_by_private_ip(zone_hosts)
         if not ordered:
             return
-        for idx, host in enumerate(ordered):
-            if idx == 0:
-                logger.info(f"zone {host.zone}: seed {host.private_ip} pulls from dockerhub")
+
+        # Prepare hosts in parallel while preserving a binary-tree pull topology.
+        # Each node pulls from its parent at index (i-1)//2. Child tasks wait for
+        # their ancestor to finish and prefer to pull from the nearest successful ancestor.
+        def _prepare_host(i: int, host: HostSpec, futures: list) -> bool:
+            try:
+                if i == 0:
+                    logger.info(f"zone {host.zone}: seed {host.private_ip} pulls from dockerhub")
+                    shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
+                    return True
+
+                # Walk up the ancestor chain to find the nearest successful ancestor
+                ancestor = (i - 1) // 2
+                while ancestor is not None and ancestor >= 0:
+                    try:
+                        parent_ok = futures[ancestor].result()
+                    except Exception:
+                        parent_ok = False
+
+                    if parent_ok:
+                        parent = ordered[ancestor]
+                        registry_host = parent.private_ip or parent.ip
+                        logger.info(f"zone {host.zone}: {host.private_ip} pulls from {registry_host}")
+                        try:
+                            shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_registry_and_push_local(registry_host))
+                            return True
+                        except Exception as exc:
+                            logger.warning(f"zone {host.zone}: {host.private_ip} failed pulling from parent {registry_host}: {exc}")
+                            # try next ancestor
+                    # move to next ancestor
+                    if ancestor == 0:
+                        ancestor = None
+                    else:
+                        ancestor = (ancestor - 1) // 2
+
+                # No successful ancestor; fall back to dockerhub to keep progress
+                logger.info(f"zone {host.zone}: {host.private_ip} falling back to dockerhub (no available ancestor)")
                 shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
-            else:
-                parent = ordered[(idx - 1) // 2]
-                registry_host = parent.private_ip or parent.ip
-                logger.info(f"zone {host.zone}: {host.private_ip} pulls from {registry_host}")
-                shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_registry_and_push_local(registry_host))
+                return True
+            except Exception as exc:
+                logger.warning(f"zone {host.zone}: {host.private_ip} prepare failed: {exc}")
+                return False
+
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(ordered)))) as zone_executor:
+            futures: list = [None] * len(ordered)
+            for i, host in enumerate(ordered):
+                futures[i] = zone_executor.submit(_prepare_host, i, host, futures)
+            # wait for all tasks to complete
+            for f in futures:
+                try:
+                    f.result()
+                except Exception:
+                    # _prepare_host is expected to return booleans and handle exceptions,
+                    # but guard against unexpected failures
+                    pass
 
     with ThreadPoolExecutor(max_workers=min(32, max(1, len(zones)))) as executor:
         futures = [executor.submit(_prepare_zone, zone_hosts) for zone_hosts in zones.values()]
