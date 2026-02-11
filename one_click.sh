@@ -1,5 +1,7 @@
 #!/bin/bash
 
+ulimit -n 65536
+
 # 加载 .env 文件
 if [ -f .env ]; then
     set -a  # 自动导出所有变量
@@ -44,11 +46,12 @@ cleanup() {
 trap cleanup EXIT
 
 LOG_PATH="logs/$(date +"%Y%m%d%H%M%S")"
+mkdir -p $LOG_PATH
 
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
 $PYTHON -m cloud_provisioner.create_instances
-cp hosts.json $LOG_PATH/hosts.json
+cp request_config.toml $LOG_PATH
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/3: 开始远程模拟..."
@@ -62,5 +65,7 @@ trap - EXIT
 print_separator "步骤 3/3：开始分析日志"
 
 python -m analyzer.stat_latency -l $LOG_PATH/nodes | tee $LOG_PATH/exp_latency.log
+python -m analyzer.log_metrics -l $LOG_PATH/nodes -o $LOG_PATH/figs -m good_tps.m1 stat_unpacked_txs stat_ready_accounts
+python -m analyzer.tree_graph_parse -l $LOG_PATH/nodes -o $LOG_PATH/figs | tee $LOG_PATH/confirmation.log
 
 print_separator "测试完毕，查看 $LOG_PATH 获得更多细节"

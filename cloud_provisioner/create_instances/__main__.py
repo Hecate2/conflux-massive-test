@@ -22,7 +22,7 @@ from .instance_config import InstanceConfig
 from .instance_provisioner import create_instances_in_region
 from .network_infra import InfraProvider, InfraRequest
 from .types import InstanceType
-from .provision_config import CloudConfig, ProvisionConfig
+from .provision_config import CloudConfig, ProvisionConfig, ProvisionRegionConfig
 
 
 def create_instances(client: IEcsClient, cloud_config: CloudConfig, barrier: threading.Barrier, allow_create: bool, infra_only: bool):
@@ -57,18 +57,18 @@ def create_instances_in_multi_region(client: IEcsClient, cloud_config: CloudConf
                       for i in cloud_config.instance_types]
     regions = filter(lambda reg: reg.count>0, cloud_config.regions)
 
-    def _create_in_region(region_id: str, nodes: int):
+    def _create_in_region(provision_config: ProvisionRegionConfig):
+        region_id = provision_config.name
         return create_instances_in_region(client, 
                                           instance_config, 
+                                          provision_config,
                                           region_info=infra_provider.get_region(region_id), 
                                           instance_types=instance_types, 
-                                          nodes=nodes, 
                                           ssh_user=cloud_config.default_user_name, 
                                           provider=cloud_config.provider)
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(lambda reg: _create_in_region(
-            reg.name, reg.count), regions))
+        results = list(executor.map(_create_in_region, regions))
         hosts = list(chain.from_iterable(results))
 
     return hosts
@@ -131,6 +131,10 @@ if __name__ == "__main__":
         if not config.aliyun.user_tag.startswith(user_tag_prefix):
             logger.error(f"Aliyun User tag {config.aliyun.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
             sys.exit(1)
+    
+    if not args.network_only:
+        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes
+        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}")
         
     if config.tencent.total_nodes > 0:
         tencent_client = TencentClient.load_from_env()
@@ -146,5 +150,6 @@ if __name__ == "__main__":
         
         hosts = list(chain.from_iterable(future.result() for future in futures))
         
-    save_hosts(hosts, args.output_json)
-    logger.success(f"节点启动完成，节点信息已写入 {args.output_json}")
+    if not args.network_only:
+        save_hosts(hosts, args.output_json)
+        logger.success(f"节点启动完成，节点信息已写入 {args.output_json}")

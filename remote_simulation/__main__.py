@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import random
 import shutil
 
 from dotenv import load_dotenv
@@ -70,7 +71,7 @@ if __name__ == "__main__":
     # 从配置文件中读取已经启动好的服务器
 
     host_specs = load_hosts(args.host_spec)
-    shutil.copy(args.host_spec, f"{log_path}/host.json")
+    shutil.copy(args.host_spec, f"{log_path}/hosts.json")
     
     
     logger.info(f"实例列表集合 {[s.ip for s in host_specs]}")
@@ -81,7 +82,7 @@ if __name__ == "__main__":
     connect_peers = min(7, num_target_nodes - 1)
 
     simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=connect_peers, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
-    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 500)
+    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 100)
     assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
@@ -93,6 +94,8 @@ if __name__ == "__main__":
     nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=True)
     if len(nodes) < simulation_config.target_nodes:
         raise Exception("Not all nodes started")
+    sample_node = random.choice(nodes)
+    logger.info(f"随机选择观察节点 {sample_node.host_spec.ip} 来自 {sample_node.host_spec.provider} {sample_node.host_spec.zone}")
     logger.success("所有节点已启动，准备连接拓扑网络")
 
     # 4. 手动连接网络
@@ -107,15 +110,16 @@ if __name__ == "__main__":
     init_tx_gen(nodes, node_config.txgen_account_count)
     logger.success("开始运行区块链系统")
     generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
-    logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
+    
+    logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     try:
-        wait_for_nodes_synced(nodes)
+        wait_for_nodes_synced(nodes, timeout=300)
         logger.success("测试完毕，准备采集日志数据")
     except WaitUntilTimeoutError as e:
         logger.warning("部分节点没有完全同步，准备采集日志数据")
     
     # 6. 获取结果
-    logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
+    logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     
     nodes_log_path = f"{log_path}/nodes"
     Path(nodes_log_path).mkdir(parents=True, exist_ok=True)

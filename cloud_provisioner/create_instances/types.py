@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, Set
+from enum import Enum
 
 from cloud_provisioner.create_instances.crypto import get_fingerprint_from_key, get_public_key_body
 
@@ -26,9 +27,16 @@ class InstanceType:
     name: str
     nodes: int
     
+class CreateInstanceError(Enum):
+    Nil = 0
+    NoStock = 1
+    NoInstanceType = 2
+    Others = 99
+    
 @dataclass(frozen=True)
 class Instance:
     instance_id: str
+    zone_id: str
     type: InstanceType
 
 @dataclass
