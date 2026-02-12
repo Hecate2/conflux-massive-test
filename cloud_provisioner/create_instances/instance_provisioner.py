@@ -52,7 +52,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
             hosts_to_request = provision_config.max_nodes
 
         instance_ids, err = client.create_instances_in_zone(
-            cfg, region_info, zone_info, instance_type, max_amount=hosts_to_request, min_amount=1)
+            cfg, region_info, zone_info, instance_type, hosts_to_request, min_amount=1)
         
         if len(instance_ids) > 0:
             verifier.submit_pending_instances(instance_ids, instance_type, zone_info.id)
@@ -89,7 +89,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
 
 def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, cfg: InstanceConfig, region_info: RegionInfo, instance_type: InstanceType, amount: int):
     for zone_info in region_info.zones.values():
-        ids, err = client.create_instances_in_zone(cfg, region_info, zone_info, instance_type, max_amount=amount, min_amount=amount)
+        ids, err = client.create_instances_in_zone(cfg, region_info, zone_info, instance_type, amount, min_amount=1)
         if len(ids) == 0:
             continue
         elif len(ids) < amount:
