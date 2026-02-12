@@ -35,7 +35,9 @@ TENCENT_REGIONS = [
     "ap-singapore",  # Singapore
     "ap-bangkok",
     "ap-jakarta",    # Jakarta
+    "me-saudi-arabia",  # Riyadh
     "ap-seoul",      # Seoul
+    "sa-saopaulo",   # São Paulo
 ]
         
 
