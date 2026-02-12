@@ -100,7 +100,7 @@ def create_instances_in_zone(
                 logger.error(f"spot run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
                 if code == "InvalidSystemDiskCategory.ValueNotSupported":
                     try:
-                        payload = req.to_map() if hasattr(req, "to_map") else {}
+                        payload = req_spot.to_map() if hasattr(req_spot, "to_map") else {}
                         logger.error(f"debug SystemDisk payload: {payload.get('SystemDisk')}")
                     except Exception:
                         pass
