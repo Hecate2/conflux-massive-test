@@ -9,7 +9,7 @@ from tencentcloud.cvm.v20170312.cvm_client import CvmClient
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 
 from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
-from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType
+from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 
 
@@ -54,9 +54,9 @@ def create_instances_in_zone(
     region_info: RegionInfo,
     zone_info: ZoneInfo,
     instance_type: InstanceType,
-    amount: int,
-    allow_partial_success: bool = False,
-) -> list[str]:
+    max_amount: int,
+    min_amount: int,
+) -> tuple[list[str], CreateInstanceError]:
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
 
     placement = cvm_models.Placement()
@@ -91,35 +91,35 @@ def create_instances_in_zone(
     req.SystemDisk = system_disk
     req.VirtualPrivateCloud = vpc
     req.InternetAccessible = internet
-    req.InstanceCount = amount
+    req.InstanceCount = max_amount
+    req.MinCount = min_amount
     req.InstanceName = name
     req.LoginSettings = login
     req.SecurityGroupIds = [region_info.security_group_id]
     req.TagSpecification = [tag_spec]
 
-    if allow_partial_success:
-        # 参数 `MinCount` 需要开名单才可以使用
-        req.MinCount = 1
-
     try:
         resp = client.RunInstances(req)
         ids = resp.InstanceIdSet or []
-        logger.success(f"Created instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
-        return ids
+        logger.success(f"Created instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
+        return ids, CreateInstanceError.Nil
     except TencentCloudSDKException as exc:
         e = traceback.format_exc()
-        code = exc.code
-        if code and any(key in code for key in ["ResourceInsufficient", "Insufficient", "NoStock"]):
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={amount}")
-            return []
+        code = exc.code or ""
+        if any(key in code for key in ["ResourceInsufficient", "Insufficient", "NoStock"]):
+            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+            return [], CreateInstanceError.NoStock
+        if any(key in code for key in ["Unsupported", "InvalidParameter", "UnsupportedOperation"]):
+            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+            return [], CreateInstanceError.NoInstanceType
         logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
         logger.error(e)
-        return []
+        return [], CreateInstanceError.Others
     except Exception as exc:
         e = traceback.format_exc()
         logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
         logger.error(e)
-        return []
+        return [], CreateInstanceError.Others
 
 
 def describe_instance_status(client: CvmClient, instance_ids: List[str]) -> InstanceStatus:
