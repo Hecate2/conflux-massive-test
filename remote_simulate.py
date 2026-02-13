@@ -118,6 +118,14 @@ def _sorted_hosts_by_private_ip(hosts: List[HostSpec]) -> List[HostSpec]:
 
 
 def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
+    script_dir = Path(__file__).resolve().parent / "auxiliary" / "scripts" / "remote"
+    dockerhub_script = script_dir / "cfx_pull_image_from_dockerhub_and_push_local.sh"
+    registry_script = script_dir / "cfx_pull_image_from_registry_and_push_local.sh"
+    if not dockerhub_script.exists():
+        raise FileNotFoundError(f"missing {dockerhub_script}")
+    if not registry_script.exists():
+        raise FileNotFoundError(f"missing {registry_script}")
+
     zones: Dict[str, List[HostSpec]] = defaultdict(list)
     for host in hosts:
         zones[host.zone].append(host)
@@ -130,6 +138,19 @@ def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
         def _prepare_host(i: int, host: HostSpec, futures: list) -> bool:
             host_ip = host.private_ip or host.ip
             try:
+                shell_cmds.scp(str(dockerhub_script), host.ip, host.ssh_user, docker_cmds.REMOTE_SCRIPT_PULL_DOCKERHUB)
+                shell_cmds.scp(str(registry_script), host.ip, host.ssh_user, docker_cmds.REMOTE_SCRIPT_PULL_REGISTRY)
+                shell_cmds.ssh(
+                    host.ip,
+                    host.ssh_user,
+                    [
+                        "chmod",
+                        "+x",
+                        docker_cmds.REMOTE_SCRIPT_PULL_DOCKERHUB,
+                        docker_cmds.REMOTE_SCRIPT_PULL_REGISTRY,
+                    ],
+                )
+
                 if i == 0:
                     logger.info(f"zone {host.zone}: seed {host_ip} pulls from dockerhub")
                     shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())

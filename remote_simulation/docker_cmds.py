@@ -5,6 +5,8 @@ REMOTE_IMAGE_TAG = "lylcx2007/conflux-node:latest"
 IMAGE_TAG = "conflux-node:latest"
 REGISTRY_IMAGE = "conflux-node:base"
 REGISTRY_PORT = 5000
+REMOTE_SCRIPT_PULL_DOCKERHUB = "/tmp/cfx_pull_image_from_dockerhub_and_push_local.sh"
+REMOTE_SCRIPT_PULL_REGISTRY = "/tmp/cfx_pull_image_from_registry_and_push_local.sh"
 
 CONTAINER_PREFIX = "conflux_node_"
 
@@ -66,70 +68,28 @@ def destory_all_nodes() -> str:
     return f"sudo docker ps -aq --filter name={CONTAINER_PREFIX} | xargs -r sudo docker rm -f && sudo rm -rf ~/log* && sudo rm -rf ~/output*"
 
 
-def _ensure_registry_running() -> str:
-    return " && ".join(
-        (
-            "sudo systemctl start docker",
-            "sudo systemctl is-active --quiet docker || sudo systemctl restart docker",
-            (
-                "if ! sudo docker ps -a --format '{{.Names}}' | grep -qx conflux-registry; "
-                "then sudo docker run -d --restart=always --name conflux-registry "
-                "-p 5000:5000 -v /opt/registry/data:/var/lib/registry registry:2; fi"
-            ),
-            "sudo docker start conflux-registry >/dev/null 2>&1 || true",
-        )
-    )
-
-
-def _configure_insecure_registry(registry_host: str) -> str:
-    registry_entry = f"{registry_host}:{REGISTRY_PORT}"
-    local_entry = f"localhost:{REGISTRY_PORT}"
-    daemon_json = f"{{\\\"insecure-registries\\\": [\\\"{registry_entry}\\\", \\\"{local_entry}\\\"]}}"
-    return " && ".join(
-        (
-            "sudo mkdir -p /etc/docker",
-            f"sudo bash -c \"printf '%s\\n' '{daemon_json}' > /etc/docker/daemon.json\"",
-            "sudo systemctl restart docker",
-        )
-    )
-
-
-def _wait_registry_ready(registry_host: str) -> str:
-    return (
-        f"for i in $(seq 1 40); do "
-        f"curl -fsS http://{registry_host}:{REGISTRY_PORT}/v2/ >/dev/null && break; "
-        f"sleep 3; "
-        f"done"
-    )
-
-
 def pull_image_from_dockerhub_and_push_local() -> str:
-    registry_image = f"localhost:{REGISTRY_PORT}/{REGISTRY_IMAGE}"
-    return " && ".join(
+    return " ".join(
         (
-            _ensure_registry_running(),
-            _wait_registry_ready("localhost"),
-            f"sudo docker pull {REMOTE_IMAGE_TAG}",
-            f"sudo docker tag {REMOTE_IMAGE_TAG} {IMAGE_TAG}",
-            f"sudo docker tag {REMOTE_IMAGE_TAG} {registry_image}",
-            f"sudo docker push {registry_image}",
+            "bash",
+            REMOTE_SCRIPT_PULL_DOCKERHUB,
+            REMOTE_IMAGE_TAG,
+            IMAGE_TAG,
+            REGISTRY_IMAGE,
+            str(REGISTRY_PORT),
         )
     )
 
 
 def pull_image_from_registry_and_push_local(registry_host: str) -> str:
-    remote_registry_image = f"{registry_host}:{REGISTRY_PORT}/{REGISTRY_IMAGE}"
-    local_registry_image = f"localhost:{REGISTRY_PORT}/{REGISTRY_IMAGE}"
-    return " && ".join(
+    return " ".join(
         (
-            _configure_insecure_registry(registry_host),
-            _ensure_registry_running(),
-            _wait_registry_ready(registry_host),
-            f"sudo docker pull {remote_registry_image}",
-            f"sudo docker tag {remote_registry_image} {IMAGE_TAG}",
-            f"sudo docker tag {remote_registry_image} {local_registry_image}",
-            _wait_registry_ready("localhost"),
-            f"sudo docker push {local_registry_image}",
+            "bash",
+            REMOTE_SCRIPT_PULL_REGISTRY,
+            registry_host,
+            IMAGE_TAG,
+            REGISTRY_IMAGE,
+            str(REGISTRY_PORT),
         )
     )
 
