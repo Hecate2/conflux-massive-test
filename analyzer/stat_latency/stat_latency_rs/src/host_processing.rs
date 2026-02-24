@@ -34,6 +34,7 @@ fn merge_host_blocks(
     data: &mut AnalysisData,
     host_blocks: HashMap<H256, crate::model::BlockJson>,
     quantile_impl: QuantileImpl,
+    expected_samples_per_block: usize,
 ) {
     for (block_hash, b) in host_blocks {
         let entry = data
@@ -56,7 +57,7 @@ fn merge_host_blocks(
         for (k, vs) in b.latencies {
             let agg = per_block
                 .entry(k)
-                .or_insert_with(|| QuantileAgg::new(quantile_impl));
+                .or_insert_with(|| QuantileAgg::new(quantile_impl, expected_samples_per_block));
             for v in vs {
                 agg.insert(v);
             }
@@ -98,10 +99,15 @@ fn merge_host_txs(data: &mut AnalysisData, host_txs: HashMap<H256, crate::model:
     }
 }
 
-fn merge_host_data(data: &mut AnalysisData, host: HostBlocksLog, quantile_impl: QuantileImpl) {
+fn merge_host_data(
+    data: &mut AnalysisData,
+    host: HostBlocksLog,
+    quantile_impl: QuantileImpl,
+    expected_samples_per_block: usize,
+) {
     merge_sync_gap_stats(data, host.sync_cons_gap_stats);
     data.by_block_ratio.extend(host.by_block_ratio);
-    merge_host_blocks(data, host.blocks, quantile_impl);
+    merge_host_blocks(data, host.blocks, quantile_impl, expected_samples_per_block);
     merge_host_txs(data, host.txs);
 }
 
@@ -145,6 +151,7 @@ pub fn load_and_merge_hosts(
     let sources = collect_sources(log_path)?;
     let mut host_processed: usize = 0;
     let total_hosts = sources.len();
+    let expected_samples_per_block = total_hosts.max(1);
 
     let mut worker_count = thread::available_parallelism()
         .map(|n| n.get())
@@ -161,7 +168,7 @@ pub fn load_and_merge_hosts(
     if worker_count == 1 {
         for source in &sources {
             let host = load_source(source)?;
-            merge_host_data(data, host, quantile_impl);
+            merge_host_data(data, host, quantile_impl, expected_samples_per_block);
             host_processed += 1;
             if host_processed % 100 == 0 {
                 eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
@@ -195,7 +202,7 @@ pub fn load_and_merge_hosts(
 
     for result in rx {
         let host = result?;
-        merge_host_data(data, host, quantile_impl);
+        merge_host_data(data, host, quantile_impl, expected_samples_per_block);
         host_processed += 1;
         if host_processed % 100 == 0 {
             eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
