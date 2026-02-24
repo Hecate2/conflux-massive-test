@@ -2,6 +2,10 @@ use anyhow::{anyhow, Result};
 use ethereum_types::H256;
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 use crate::io_utils::{load_host_log_from_archive, load_host_log_from_path, scan_logs};
 use crate::model::{AnalysisData, BlockInfo, HostBlocksLog, TxAgg};
@@ -95,7 +99,20 @@ fn merge_host_data(data: &mut AnalysisData, host: HostBlocksLog) {
     merge_host_txs(data, host.txs);
 }
 
-pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<()> {
+#[derive(Debug, Clone)]
+enum LogSource {
+    Plain(PathBuf),
+    Archive(PathBuf),
+}
+
+fn load_source(source: &LogSource) -> Result<HostBlocksLog> {
+    match source {
+        LogSource::Plain(p) => load_host_log_from_path(p),
+        LogSource::Archive(p) => load_host_log_from_archive(p),
+    }
+}
+
+fn collect_sources(log_path: &Path) -> Result<Vec<LogSource>> {
     let (blocks_logs, archives) = scan_logs(log_path)?;
     if blocks_logs.is_empty() && archives.is_empty() {
         return Err(anyhow!(
@@ -104,24 +121,82 @@ pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<
         ));
     }
 
-    let mut host_processed: usize = 0;
-    let total_hosts = blocks_logs.len() + archives.len();
-
+    let mut sources = Vec::with_capacity(blocks_logs.len() + archives.len());
     for p in blocks_logs {
-        let host = load_host_log_from_path(&p)?;
-        merge_host_data(data, host);
-        host_processed += 1;
-        if host_processed % 100 == 0 {
-            eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
-        }
+        sources.push(LogSource::Plain(p));
     }
     for p in archives {
-        let host = load_host_log_from_archive(&p)?;
+        sources.push(LogSource::Archive(p));
+    }
+    Ok(sources)
+}
+
+pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<()> {
+    let sources = collect_sources(log_path)?;
+    let mut host_processed: usize = 0;
+    let total_hosts = sources.len();
+
+    let mut worker_count = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1)
+        .min(8)
+        .min(total_hosts.max(1));
+    if let Ok(override_workers) = std::env::var("STAT_LATENCY_WORKERS") {
+        if let Ok(n) = override_workers.parse::<usize>() {
+            worker_count = n.max(1).min(total_hosts.max(1));
+        }
+    }
+
+    if worker_count == 1 {
+        for source in &sources {
+            let host = load_source(source)?;
+            merge_host_data(data, host);
+            host_processed += 1;
+            if host_processed % 100 == 0 {
+                eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
+            }
+        }
+        return Ok(());
+    }
+
+    let shared_sources = Arc::new(sources);
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (tx, rx) = mpsc::sync_channel::<Result<HostBlocksLog>>(worker_count * 2);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let tx = tx.clone();
+        let shared_sources = Arc::clone(&shared_sources);
+        let next_index = Arc::clone(&next_index);
+        handles.push(thread::spawn(move || {
+            loop {
+                let idx = next_index.fetch_add(1, Ordering::Relaxed);
+                if idx >= shared_sources.len() {
+                    break;
+                }
+                if tx.send(load_source(&shared_sources[idx])).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(tx);
+
+    for result in rx {
+        let host = result?;
         merge_host_data(data, host);
         host_processed += 1;
         if host_processed % 100 == 0 {
             eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
         }
+        if host_processed == total_hosts {
+            break;
+        }
+    }
+
+    for handle in handles {
+        let _ = handle.join();
     }
 
     Ok(())
