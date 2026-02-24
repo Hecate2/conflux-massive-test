@@ -6,7 +6,7 @@ import sys
 import threading
 import tomllib
 import traceback
-from typing import Optional
+from typing import Callable, Optional
 import os
 
 from dotenv import load_dotenv
@@ -24,6 +24,61 @@ from .network_infra import InfraProvider, InfraRequest
 from .types import InstanceType
 from .provision_config import CloudConfig, ProvisionConfig, ProvisionRegionConfig
 from .region_backfill import backfill_shortfall, count_nodes, healthy_regions_for_backfill, run_regions_with_config
+
+
+def calculate_shortfall(region_results, target_total_nodes: int) -> int:
+    created_nodes = sum(result["actual_nodes"] for result in region_results)
+    shortfall = target_total_nodes - created_nodes
+
+    underfilled = [
+        result for result in region_results
+        if result["actual_nodes"] < result["requested_nodes"]
+    ]
+    if underfilled:
+        detail = ", ".join(
+            f"{result['region']}({result['actual_nodes']}/{result['requested_nodes']})"
+            for result in underfilled
+        )
+        logger.warning(f"Regions under target: {detail}")
+
+    return shortfall
+
+
+def apply_shortfall_backfill(
+    create_in_region: Callable[[ProvisionRegionConfig], list],
+    region_results,
+    hosts: list,
+    shortfall: int,
+) -> int:
+    if shortfall > 0:
+        healthy_regions = healthy_regions_for_backfill(region_results)
+        if healthy_regions:
+            logger.warning(f"Total nodes shortfall={shortfall}, try backfill in healthy regions")
+            extra_hosts, remaining = backfill_shortfall(create_in_region, healthy_regions, shortfall)
+            hosts.extend(extra_hosts)
+            return remaining
+
+    return shortfall
+
+
+def create_hosts_with_optional_backfill(
+    create_in_region: Callable[[ProvisionRegionConfig], list],
+    regions: list[ProvisionRegionConfig],
+    target_total_nodes: int,
+    allow_backfill: bool,
+) -> tuple[list, int]:
+    region_results = run_regions_with_config(create_in_region, regions)
+    hosts = list(chain.from_iterable(result["hosts"] for result in region_results))
+    shortfall = calculate_shortfall(region_results, target_total_nodes)
+    if allow_backfill:
+        shortfall = apply_shortfall_backfill(
+            create_in_region,
+            region_results,
+            hosts,
+            shortfall,
+        )
+
+    return hosts, shortfall
 
 
 def create_instances(
@@ -82,31 +137,12 @@ def create_instances_in_multi_region(
                                           provider=cloud_config.provider)
 
     target_total_nodes = cloud_config.total_nodes
-    region_results = run_regions_with_config(_create_in_region, regions)
-    hosts = list(chain.from_iterable(result["hosts"] for result in region_results))
-    created_nodes = count_nodes(hosts)
-    shortfall = target_total_nodes - created_nodes
-
-    underfilled = [
-        result for result in region_results
-        if result["actual_nodes"] < result["requested_nodes"]
-    ]
-    if underfilled:
-        detail = ", ".join(
-            f"{result['region']}({result['actual_nodes']}/{result['requested_nodes']})"
-            for result in underfilled
-        )
-        logger.warning(f"Regions under target: {detail}")
-
-    if shortfall > 0 and allow_backfill:
-        healthy_regions = healthy_regions_for_backfill(region_results)
-        if healthy_regions:
-            logger.warning(f"Total nodes shortfall={shortfall}, try backfill in healthy regions")
-            extra_hosts, remaining = backfill_shortfall(_create_in_region, healthy_regions, shortfall)
-            hosts.extend(extra_hosts)
-            shortfall = remaining
-    elif shortfall > 0 and not allow_backfill:
-        logger.warning(f"Backfill disabled, keep shortfall={shortfall}")
+    hosts, shortfall = create_hosts_with_optional_backfill(
+        _create_in_region,
+        regions,
+        target_total_nodes,
+        allow_backfill,
+    )
 
     final_nodes = count_nodes(hosts)
     if shortfall <= 0:
