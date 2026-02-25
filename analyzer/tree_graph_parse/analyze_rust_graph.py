@@ -3,12 +3,14 @@ import glob
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
-from .tg_parse_rpy import RustGraph
+from tg_parse_rpy import RustGraph
 from tqdm import tqdm
 import numpy as np
 from functools import partial
 from prettytable import PrettyTable
 from numpy.typing import NDArray
+from pathlib import Path
+from analyzer.sevenz_utils import iter_selected_file_bytes
 
 
 def find_files(root_path: str, pattern: str) -> List[str]:
@@ -22,6 +24,8 @@ def find_files(root_path: str, pattern: str) -> List[str]:
     Returns:
         文件路径列表
     """
+    if not Path(root_path).is_dir():
+        return []
     matching_files = []
 
     # 使用glob模式匹配文件
@@ -59,26 +63,44 @@ def load_all_graphs(file_paths: List[str], max_workers: Optional[int] = None) ->
     return graphs
 
 
-def _process_file(path, adv_percent, risk):
-    return (path, *RustGraph.load(path).avg_confirm_time(adv_percent, risk))
+def _process_path(path, adv_percent, risk):
+    graph = RustGraph.load(path)
+    confirm_time, confirm_blocks = graph.avg_confirm_time(adv_percent, risk)
+    return (path, confirm_time, confirm_blocks, graph)
+
+
+def _process_archive_member(item, adv_percent, risk):
+    name, payload = item
+    graph = RustGraph.load_text(payload.decode("utf-8", errors="ignore"))
+    confirm_time, confirm_blocks = graph.avg_confirm_time(adv_percent, risk)
+    return (name, confirm_time, confirm_blocks, graph)
 
 
 def load_network_result(path, adv_percent: int = 10, risk: float = 1e-6):
-    matching_files = find_files(path, "conflux.log.new_blocks")
-    func = partial(_process_file, adv_percent=adv_percent, risk=risk)
+    if Path(path).is_dir():
+        matching_files = find_files(path, "conflux.log.new_blocks")
+        process_func = partial(_process_path, adv_percent=adv_percent, risk=risk)
+        inputs = matching_files
+    else:
+        archive_items = list(iter_selected_file_bytes(path, "conflux.log.new_blocks"))
+        process_func = partial(_process_archive_member, adv_percent=adv_percent, risk=risk)
+        inputs = archive_items
+
+    if not inputs:
+        return [], np.array([]), np.array([]), []
 
     # 使用线程池处理文件
     with ThreadPoolExecutor() as executor:
-        pathes, confirm_times, confirm_blocks = tuple(
-            zip(*executor.map(func, matching_files)))
+        labels, confirm_times, confirm_blocks, graphs = tuple(
+            zip(*executor.map(process_func, inputs)))
 
-    return pathes, np.array(confirm_times), np.array(confirm_blocks)
+    return labels, np.array(confirm_times), np.array(confirm_blocks), list(graphs)
 
 
 def graph_by_pencentile(network_result, percentile) -> RustGraph:
-    pathes, confirm_time, blocks = network_result
+    _labels, confirm_time, _blocks, graphs = network_result
     index = percentile_to_index(confirm_time, percentile)
-    return RustGraph.load(pathes[index])
+    return graphs[index]
 
 
 def worst_graph(network_result) -> RustGraph:

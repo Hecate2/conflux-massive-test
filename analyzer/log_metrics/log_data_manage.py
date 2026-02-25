@@ -10,7 +10,7 @@ import time
 from typing import Optional, Set, Tuple, Self
 from types import SimpleNamespace
 import numpy.typing as npt
-from .utils import iter_log_file_items, time_decay_weighted_average, node_paths, parse_metric_name, create_namespace_from_string_set
+from .utils import iter_log_file_items, iter_log_lines_items, time_decay_weighted_average, node_paths, parse_metric_name, create_namespace_from_string_set
 
 
 class SingleNodeMetrics:
@@ -56,6 +56,13 @@ class SingleNodeMetrics:
             raise FileNotFoundError(f"日志文件不存在: {directory_path}")
 
     @classmethod
+    def load_from_bytes(cls, source_name: str, payload: bytes) -> Self:
+        text = payload.decode("utf-8", errors="ignore")
+        lines = text.splitlines()
+        df = cls.preprocess_items(iter_log_lines_items(lines), None)
+        return cls(pathlib.Path(source_name), df)
+
+    @classmethod
     def preprocess_log_file(cls, log_file: pathlib.Path, pq_file: pathlib.Path) -> pd.DataFrame:
         """
         预处理日志文件并存储优化后的parquet格式
@@ -67,8 +74,12 @@ class SingleNodeMetrics:
         Returns:
             处理后的DataFrame
         """
+        return cls.preprocess_items(iter_log_file_items(log_file), pq_file)
+
+    @classmethod
+    def preprocess_items(cls, items, pq_file: Optional[pathlib.Path]) -> pd.DataFrame:
         # 创建DataFrame
-        df = pd.DataFrame(iter_log_file_items(log_file), columns=[
+        df = pd.DataFrame(items, columns=[
                           'timestamp', 'module', 'key', 'value'])
 
         # 优化数据类型
@@ -84,12 +95,16 @@ class SingleNodeMetrics:
         df = df.set_index(['module', 'key']).sort_index()
 
         # 保存为parquet
-        df.to_parquet(
-            pq_file,
-            engine='pyarrow',
-            compression='snappy',  # 平衡压缩率和速度
-            index=True
-        )
+        if pq_file is not None:
+            try:
+                df.to_parquet(
+                    pq_file,
+                    engine='pyarrow',
+                    compression='snappy',  # 平衡压缩率和速度
+                    index=True
+                )
+            except ImportError:
+                pass
 
         return df
 
@@ -343,9 +358,14 @@ class GlobalMetricsStats:
         返回:
             对每个节点应用函数后的结果列表
         """
-        with mp.Pool(processes=mp.cpu_count()) as pool:
-            paths: List[str] = node_paths(log_dir)
-            return list(tqdm(pool.imap(func, paths), total=len(paths), desc=desc))
+        paths: List[str] = node_paths(log_dir)
+        results: List[T] = []
+        for path in tqdm(paths, total=len(paths), desc=desc):
+            try:
+                results.append(func(path))
+            except FileNotFoundError:
+                continue
+        return results
         # return [func(path) for path in node_paths(log_dir)]
 
     @classmethod
@@ -408,6 +428,9 @@ class GlobalMetricsStats:
 
         valid_nodes = len(result_list)
         total_nodes = len(self.node_stats_list)
+
+        if total_nodes == 0:
+            return None
         
         if valid_nodes / total_nodes < 0.8:
             print(f"警告: 在 {self.log_dir} 中仅找到 {valid_nodes}/{total_nodes} 个节点具有指标 {metric_name}")

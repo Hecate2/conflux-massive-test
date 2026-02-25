@@ -59,6 +59,42 @@ pub fn load_host_log_from_archive(path: &Path) -> Result<HostBlocksLog> {
     Ok(host)
 }
 
+pub fn list_blocks_log_members_in_archive(path: &Path) -> Result<Vec<String>> {
+    let mut seven = archive_reader(path)?;
+    let mut members: Vec<String> = Vec::new();
+    seven
+        .for_each_entries(|entry, _| {
+            if entry.name().ends_with("blocks.log") {
+                members.push(entry.name().to_string());
+            }
+            Ok(true)
+        })
+        .with_context(|| format!("failed to iterate entries in {}", path.display()))?;
+
+    if members.is_empty() {
+        return Err(anyhow!("no blocks.log found in archive {}", path.display()));
+    }
+
+    members.sort_by(|a, b| {
+        let la = a.len();
+        let lb = b.len();
+        la.cmp(&lb).then_with(|| a.cmp(b))
+    });
+    Ok(members)
+}
+
+pub fn load_host_log_from_archive_member(path: &Path, member: &str) -> Result<HostBlocksLog> {
+    let data = extract_member_from_7z(path, member)?;
+    let host: HostBlocksLog = serde_json::from_slice(&data).with_context(|| {
+        format!(
+            "parse JSON from {} (member {} in archive)",
+            path.display(),
+            member
+        )
+    })?;
+    Ok(host)
+}
+
 fn archive_reader(path: &Path) -> Result<sevenz_rust::SevenZReader<fs::File>> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("failed to open archive {}", path.display()))?;
@@ -82,29 +118,7 @@ fn extract_blocks_log_from_7z(archive_path: &Path) -> Result<Vec<u8>> {
         return Ok(bytes);
     }
 
-    let mut seven = archive_reader(archive_path)?;
-    let mut candidates: Vec<String> = Vec::new();
-    seven
-        .for_each_entries(|entry, _| {
-            if entry.name().ends_with("blocks.log") {
-                candidates.push(entry.name().to_string());
-            }
-            Ok(true)
-        })
-        .with_context(|| format!("failed to iterate entries in {}", archive_path.display()))?;
-
-    if candidates.is_empty() {
-        return Err(anyhow!(
-            "no blocks.log found in archive {}",
-            archive_path.display()
-        ));
-    }
-
-    candidates.sort_by(|a, b| {
-        let la = a.len();
-        let lb = b.len();
-        la.cmp(&lb).then_with(|| a.cmp(b))
-    });
+    let candidates = list_blocks_log_members_in_archive(archive_path)?;
     extract_member_from_7z(archive_path, &candidates[0])
 }
 

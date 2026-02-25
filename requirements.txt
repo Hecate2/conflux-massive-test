@@ -25,3 +25,4 @@ trie
 web3==7.4.0
 websockets==15.0.1
 tqdm==4.66.4
+py7zr==0.22.0

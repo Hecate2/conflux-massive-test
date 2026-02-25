@@ -1,7 +1,9 @@
 import argparse
+from pathlib import Path
 
 import numpy as np
-from .tg_parse_rpy import RustGraph
+from analyzer.sevenz_utils import is_supported_input
+from tg_parse_rpy import RustGraph
 from .analyze_rust_graph import load_network_result, median_graph, worst_graph, describe_blocks, best_graph
 from .plot import plot_percentiles
 
@@ -25,11 +27,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     path = args.log_path
+    if not is_supported_input(path):
+        raise ValueError("Only directory logs and whole .7z archive inputs are supported")
+
     output_path = args.output_path
+    Path(output_path).mkdir(parents=True, exist_ok=True)
 
     
     net_info = load_network_result(path)
-    pathes, confirm_times, blocks = net_info
+    _labels, confirm_times, blocks, _graphs = net_info
+    if len(confirm_times) == 0:
+        print(f"No conflux.log.new_blocks found in {path}")
+        raise SystemExit(0)
     print(f"Network avg time {confirm_times.mean(): .1f} median {np.median(confirm_times): .1f} with {blocks[2].mean(): .1f} blocks confirmed")
     
 

@@ -16,6 +16,7 @@ statrs = { workspace = true }
 cached = { workspace = true }
 itertools = { workspace = true }
 walkdir = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 
 
 [dev-dependencies]

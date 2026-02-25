@@ -10,7 +10,7 @@ pub enum QuantileImplArg {
 #[derive(Parser, Debug)]
 #[command(about = "Analyze Conflux massive-test latency logs (memory-optimized)")]
 pub struct Args {
-    /// Log directory containing host subdirs with blocks.log or output*.7z
+    /// Log input path: directory with host logs, directory with output*.7z, or a single whole .7z archive
     #[arg(short = 'l', long = "log-path")]
     pub log_path: PathBuf,
 

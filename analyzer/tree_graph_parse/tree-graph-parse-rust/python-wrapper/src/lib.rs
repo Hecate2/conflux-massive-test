@@ -29,6 +29,13 @@ impl RustGraph {
         Ok(Self { graph })
     }
 
+    #[staticmethod]
+    fn load_text(content: &str, py: Python) -> PyResult<Self> {
+        let graph = no_gil!(py, Graph::load_from_text(content))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        Ok(Self { graph })
+    }
+
     #[getter]
     fn genesis_block(&self) -> RustBlock { self.graph.genesis_block().into() }
 

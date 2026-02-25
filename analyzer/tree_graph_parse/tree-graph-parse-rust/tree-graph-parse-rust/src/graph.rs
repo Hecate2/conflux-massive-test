@@ -3,7 +3,7 @@ use ethereum_types::H256;
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, Write},
+    io::{BufRead, BufReader, Write},
 };
 
 use crate::{
@@ -18,9 +18,7 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn load(file_or_path: &str) -> Result<Self, anyhow::Error> {
-        let reader = load::open_conflux_log(file_or_path)?;
-
+    fn load_from_reader<R: BufRead>(reader: R) -> Result<Self, anyhow::Error> {
         let mut root_hash: Option<H256> = None;
         let mut block_map: HashMap<H256, Block> = Default::default();
 
@@ -66,6 +64,17 @@ impl Graph {
             root_hash,
         });
         unready_graph.finalize()
+    }
+
+    pub fn load(file_or_path: &str) -> Result<Self, anyhow::Error> {
+        let reader = load::open_conflux_log(file_or_path)?;
+
+        Self::load_from_reader(reader)
+    }
+
+    pub fn load_from_text(content: &str) -> Result<Self, anyhow::Error> {
+        let reader = BufReader::new(content.as_bytes());
+        Self::load_from_reader(reader)
     }
 
     pub fn blocks(&self) -> impl Iterator<Item = &Block> + '_ { self.block_map.values() }

@@ -5,8 +5,10 @@ import dateutil.parser
 import json
 import enum
 import re
+import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from analyzer.sevenz_utils import iter_selected_file_bytes
 
 def parse_value(log_line:str, prefix:str, suffix:str):
     start = 0 if prefix is None else log_line.index(prefix) + len(prefix)
@@ -511,6 +513,11 @@ class HostLogReducer:
             return HostLogReducer.load(data)
 
     @staticmethod
+    def loadb(payload: bytes):
+        data = json.load(io.StringIO(payload.decode("utf-8")))
+        return HostLogReducer.load(data)
+
+    @staticmethod
     def reduced(log_dir:str, executor:ThreadPoolExecutor):
         futures = []
         for (path, _, files) in os.walk(log_dir):
@@ -643,7 +650,10 @@ class LogAggregator:
         data = []
 
         for block_stat in self.block_latency_stats[t].values():
-            data.append(block_stat.get(p))
+            try:
+                data.append(block_stat.get(p))
+            except KeyError:
+                continue
 
         return Statistics(data)
     
@@ -659,7 +669,10 @@ class LogAggregator:
         data = []
 
         for tx_stat in self.tx_latency_stats.values():
-            data.append(tx_stat.get(p))
+            try:
+                data.append(tx_stat.get(p))
+            except KeyError:
+                continue
 
         return Statistics(data)
 
@@ -667,7 +680,10 @@ class LogAggregator:
         data =[]
 
         for tx_stat in self.tx_packed_to_block_latency.values():
-            data.append(tx_stat.get(p))
+            try:
+                data.append(tx_stat.get(p))
+            except KeyError:
+                continue
 
         return Statistics(data)
 
@@ -688,16 +704,18 @@ class LogAggregator:
         agg = LogAggregator()
         executor = ThreadPoolExecutor(max_workers=8)
 
-        futures = []
-        for (path, _, files) in os.walk(logs_dir):
-            for f in files:
-                if f == "blocks.log":
-                    log_file = os.path.join(path, f)
-                    futures.append(executor.submit(HostLogReducer.loadf, log_file))
+        futures = [
+            executor.submit(HostLogReducer.loadb, payload)
+            for _, payload in iter_selected_file_bytes(logs_dir, "blocks.log")
+        ]
 
         # process host reducers as they complete to reduce peak memory
         for future in as_completed(futures):
-            host = future.result()
+            try:
+                host = future.result()
+            except Exception as exc:
+                print(f"skip invalid blocks.log entry: {exc}")
+                continue
             agg.add_host(host)
             del host
 

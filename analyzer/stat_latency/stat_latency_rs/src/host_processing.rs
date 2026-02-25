@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use crate::io_utils::{load_host_log_from_archive, load_host_log_from_path, scan_logs};
+use crate::io_utils::{
+    list_blocks_log_members_in_archive, load_host_log_from_archive, load_host_log_from_archive_member,
+    load_host_log_from_path, scan_logs,
+};
 use crate::model::{AnalysisData, BlockInfo, HostBlocksLog, TxAgg};
 use crate::quantile::{QuantileAgg, QuantileImpl};
 use crate::stats::f64_from_stat;
@@ -118,12 +121,16 @@ fn merge_host_data(
 enum LogSource {
     Plain(PathBuf),
     Archive(PathBuf),
+    ArchiveMember { archive: PathBuf, member: String },
 }
 
 fn load_source(source: &LogSource) -> Result<HostBlocksLog> {
     match source {
         LogSource::Plain(p) => load_host_log_from_path(p),
         LogSource::Archive(p) => load_host_log_from_archive(p),
+        LogSource::ArchiveMember { archive, member } => {
+            load_host_log_from_archive_member(archive, member)
+        }
     }
 }
 
@@ -141,7 +148,18 @@ fn collect_sources(log_path: &Path) -> Result<Vec<LogSource>> {
         sources.push(LogSource::Plain(p));
     }
     for p in archives {
-        sources.push(LogSource::Archive(p));
+        let members = list_blocks_log_members_in_archive(&p)?;
+        if members.len() <= 1 {
+            sources.push(LogSource::Archive(p));
+            continue;
+        }
+
+        for member in members {
+            sources.push(LogSource::ArchiveMember {
+                archive: p.clone(),
+                member,
+            });
+        }
     }
     Ok(sources)
 }
@@ -170,7 +188,13 @@ pub fn load_and_merge_hosts(
 
     if worker_count == 1 {
         for source in &sources {
-            let host = load_source(source)?;
+            let host = match load_source(source) {
+                Ok(host) => host,
+                Err(err) => {
+                    eprintln!("skip invalid host source {:?}: {}", source, err);
+                    continue;
+                }
+            };
             merge_host_data(data, host, quantile_impl, expected_samples_per_block);
             host_processed += 1;
             if host_processed % 100 == 0 {
@@ -202,7 +226,13 @@ pub fn load_and_merge_hosts(
     drop(tx);
 
     for result in rx {
-        let host = result?;
+        let host = match result {
+            Ok(host) => host,
+            Err(err) => {
+                eprintln!("skip invalid host source: {}", err);
+                continue;
+            }
+        };
         merge_host_data(data, host, quantile_impl, expected_samples_per_block);
         host_processed += 1;
         if host_processed % 100 == 0 {
