@@ -3,7 +3,6 @@
 
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
-import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +21,7 @@ from remote_simulation.config_builder import ConfluxOptions, SimulateOptions, ge
 from remote_simulation.network_connector import connect_nodes
 from remote_simulation.network_topology import NetworkTopology
 from remote_simulation.port_allocation import remote_rpc_port
+from remote_simulation.image_prepare import prepare_images_by_zone
 from remote_simulation.remote_node import RemoteNode
 from remote_simulation.tools import init_tx_gen, wait_for_nodes_synced
 from utils.counter import AtomicCounter
@@ -110,7 +110,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
-    script_local = Path(__file__).resolve().parent / "auxiliary" / "scripts" / "remote" / "collect_logs_root.sh"
+    script_local = Path(__file__).resolve().parent / "scripts" / "remote" / "collect_logs_root.sh"
     if not script_local.exists():
         raise FileNotFoundError(f"missing {script_local}")
 
@@ -192,7 +192,10 @@ if __name__ == "__main__":
     log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
-    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=True)
+    logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
+    prepare_images_by_zone(hosts)
+
+    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=False)
     if len(nodes) < simulation_config.target_nodes:
         # raise RuntimeError("Not all nodes started")
         logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
