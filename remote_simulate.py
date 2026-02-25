@@ -116,32 +116,48 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
 
     Path(local_path).mkdir(parents=True, exist_ok=True)
 
-    def _stop_and_collect(node: RemoteNode) -> int:
+    def _archive_base(host: HostSpec) -> str:
+        return "/root" if host.ssh_user == "root" else f"/home/{host.ssh_user}"
+
+    def _generate(node: RemoteNode) -> tuple[RemoteNode, bool]:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
             shell_cmds.scp(str(script_local), node.host_spec.ip, node.host_spec.ssh_user, remote_script)
-            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["sudo", "bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
             shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
+            return node, True
+        except Exception as exc:
+            logger.warning(f"节点 {node.id} 日志生成遇到问题: {exc}")
+            return node, False
+
+    def _sync(node: RemoteNode) -> int:
+        try:
             local_node_path = str(Path(local_path) / node.id)
             Path(local_node_path).mkdir(parents=True, exist_ok=True)
-            shell_cmds.rsync_download(
-                f"/root/output{node.index}/",
-                local_node_path,
-                node.host_spec.ip,
-                user=node.host_spec.ssh_user,
-            )
+            remote_archive = f"{_archive_base(node.host_spec)}/output{node.index}.7z"
+            shell_cmds.rsync_download(remote_archive, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
             return 0
         except Exception as exc:
-            logger.warning(f"节点 {node.id} 日志生成遇到问题: {exc}")
+            logger.warning(f"节点 {node.id} 日志同步遇到问题: {exc}")
             return 1
 
-    with ThreadPoolExecutor(max_workers=200) as executor:
-        results = executor.map(_stop_and_collect, nodes)
-    _ = sum(results)
+    with ThreadPoolExecutor(max_workers=128) as gen_executor:
+        gen_results = list(gen_executor.map(_generate, nodes))
+
+    gen_success_nodes = [n for n, ok in gen_results if ok]
+    gen_success_cnt = len(gen_success_nodes)
+    logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
+
+    with ThreadPoolExecutor(max_workers=32) as sync_executor:
+        sync_results = list(sync_executor.map(_sync, gen_success_nodes))
+
+    sync_failures = sum(sync_results)
+    sync_success_cnt = len(gen_success_nodes) - sync_failures
+    logger.info(f"日志同步完成: 成功 {sync_success_cnt}/{gen_success_cnt}（{sync_failures} 失败）")
 
 
 if __name__ == "__main__":
