@@ -5,6 +5,8 @@ mod host_processing;
 mod io_utils;
 mod model;
 mod quantile;
+mod quantile_brute;
+mod quantile_tdigest;
 mod report;
 mod stats;
 

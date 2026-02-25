@@ -1,8 +1,6 @@
 use crate::model::NodePercentile;
-use std::cmp::Reverse;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use tdigests::TDigest;
+use crate::quantile_brute::BruteQuantileState;
+use crate::quantile_tdigest::TDigestQuantileState;
 
 #[derive(Debug, Clone, Copy)]
 pub enum QuantileImpl {
@@ -10,31 +8,10 @@ pub enum QuantileImpl {
     TDigest,
 }
 
-fn exact_quantile(values: &[f64], q: f64) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-    let idx = ((sorted.len() - 1) as f64 * q) as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct F64Ord(f64);
-
-impl Eq for F64Ord {}
-
-impl PartialOrd for F64Ord {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for F64Ord {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
-    }
+#[derive(Debug)]
+enum QuantileBackend {
+    Brute(BruteQuantileState),
+    TDigest(TDigestQuantileState),
 }
 
 #[derive(Debug)]
@@ -43,26 +20,23 @@ pub struct QuantileAgg {
     sum: f64,
     min: f64,
     max: f64,
-    impl_kind: QuantileImpl,
-    values: Vec<f64>,
-    digest: Option<TDigest>,
-    high_tail_cap: usize,
-    high_tail: BinaryHeap<Reverse<F64Ord>>,
+    backend: QuantileBackend,
 }
 
 impl QuantileAgg {
     pub fn new(impl_kind: QuantileImpl, expected_count: usize) -> Self {
-        let high_tail_cap = ((expected_count as f64) * 0.1).ceil() as usize + 1;
+        let backend = match impl_kind {
+            QuantileImpl::Brute => QuantileBackend::Brute(BruteQuantileState::new()),
+            QuantileImpl::TDigest => {
+                QuantileBackend::TDigest(TDigestQuantileState::new(expected_count))
+            }
+        };
         Self {
             count: 0,
             sum: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
-            impl_kind,
-            values: Vec::new(),
-            digest: None,
-            high_tail_cap: high_tail_cap.max(1),
-            high_tail: BinaryHeap::new(),
+            backend,
         }
     }
 
@@ -74,24 +48,9 @@ impl QuantileAgg {
         self.sum += x;
         self.min = self.min.min(x);
         self.max = self.max.max(x);
-        match self.impl_kind {
-            QuantileImpl::Brute => self.values.push(x),
-            QuantileImpl::TDigest => {
-                let incoming = TDigest::from_values(vec![x]);
-                let mut merged = match self.digest.take() {
-                    Some(existing) => existing.merge(&incoming),
-                    None => incoming,
-                };
-                if self.count % 1024 == 0 {
-                    merged.compress(200);
-                }
-                self.digest = Some(merged);
-
-                self.high_tail.push(Reverse(F64Ord(x)));
-                if self.high_tail.len() > self.high_tail_cap {
-                    let _ = self.high_tail.pop();
-                }
-            }
+        match &mut self.backend {
+            QuantileBackend::Brute(state) => state.insert(x),
+            QuantileBackend::TDigest(state) => state.insert(x, self.count),
         }
     }
 
@@ -115,36 +74,9 @@ impl QuantileAgg {
     }
 
     fn quantile(&self, q: f64) -> f64 {
-        match self.impl_kind {
-            QuantileImpl::Brute => exact_quantile(&self.values, q),
-            QuantileImpl::TDigest => {
-                if q >= 0.9 {
-                    if let Some(v) = self.high_quantile_exact_from_tail(q) {
-                        return v;
-                    }
-                }
-                self.digest
-                    .as_ref()
-                    .map(|d| d.estimate_quantile(q))
-                    .unwrap_or(f64::NAN)
-            }
+        match &self.backend {
+            QuantileBackend::Brute(state) => state.quantile(q),
+            QuantileBackend::TDigest(state) => state.quantile(q, self.count),
         }
-    }
-
-    fn high_quantile_exact_from_tail(&self, q: f64) -> Option<f64> {
-        if self.count == 0 || self.high_tail.is_empty() {
-            return None;
-        }
-        let n = self.count as usize;
-        let idx = ((n - 1) as f64 * q) as usize;
-        let rank_from_top = (n - 1).saturating_sub(idx);
-
-        if rank_from_top >= self.high_tail.len() {
-            return None;
-        }
-
-        let mut desc: Vec<f64> = self.high_tail.iter().map(|x| x.0 .0).collect();
-        desc.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-        desc.get(rank_from_top).copied()
     }
 }
