@@ -84,8 +84,8 @@ class SingleNodeMetrics:
         df['key'] = df['key'].astype('category')
         df['value'] = df['value'].astype(np.float64)
 
-        # 为所有以.count结尾的指标添加.count.m1派生指标
-        df = cls._add_count_m1_metrics(df)
+        # 为所有以.count结尾的指标添加.count.m1和.count.m0派生指标
+        df = cls._add_count_derived_metrics(df)
 
         # 创建多级索引以加速查询
         df = df.set_index(['module', 'key']).sort_index()
@@ -101,43 +101,64 @@ class SingleNodeMetrics:
         return df
 
     @classmethod
-    def _add_count_m1_metrics(cls, df: pd.DataFrame) -> pd.DataFrame:
+    def _add_count_derived_metrics(cls, df: pd.DataFrame) -> pd.DataFrame:
         """
-        为所有以.count结尾的指标添加使用时间衰减加权平均的.m1派生指标
-
+        为所有以.count结尾的指标添加派生指标：
+          - .count.m1：时间衰减加权平均速率（每秒）
+          - .count.m0：原始速率（每秒）
+    
         Args:
             df: 原始指标DataFrame
-
+    
         Returns:
-            添加了.m1派生指标的DataFrame
+            添加了派生指标的DataFrame
         """
         # 查找所有以.count结尾的key
         count_keys = df[df['key'].str.endswith('.count')]
-
+    
         # 新行的列表
         new_rows = []
-
+    
         # 对每个count指标分组处理
         for (module, key), group in count_keys.groupby(['module', 'key'], observed=True):
             # 排序确保时间戳顺序
             group = group.sort_values('timestamp')
-
+    
             # 获取时间戳和值
             timestamps = group['timestamp'].to_numpy()
             values = group['value'].to_numpy()
-
-            # 计算新值
-            new_values = time_decay_weighted_average(timestamps, values)
-
+            N = len(timestamps)
+    
+            if N < 2:
+                continue  # 至少需要2个点才能算速率
+    
+            # 计算每个区间的原始速率（每秒）
+            count_diffs = np.empty(N)
+            count_diffs[0] = 0.0  # 第一个点没有前一个区间
+            count_diffs[1:] = values[1:] - values[:-1]
+    
+            time_diffs_sec = np.empty(N)
+            time_diffs_sec[0] = 1.0  # 避免除零，反正 count_diffs[0]=0
+            time_diffs_sec[1:] = (timestamps[1:] - timestamps[:-1]) / 1000.0  # ms -> sec
+    
+            # .m0: 原始速率 = delta_count / delta_time_sec
+            m0_values = count_diffs / time_diffs_sec
+    
+            # .m1: 对速率做时间衰减加权平均
+            # 时间差矩阵（分钟），用于计算指数衰减权重
+            time_diff_matrix = (timestamps - timestamps[:, np.newaxis]) / 60_000
+            lower_mask = np.tril(np.ones((N, N), dtype=bool))
+            time_diff_matrix[~lower_mask] = -10000  # 上三角设为很小的值，exp后接近0
+            decay_weights = np.exp(time_diff_matrix)
+            weight_sums = decay_weights.sum(axis=1, keepdims=True)
+            normalized_weights = decay_weights / weight_sums
+            m1_values = normalized_weights @ m0_values  # 加权平均速率
+    
             # 创建新行
-            for ts, val in zip(timestamps, new_values):
-                new_rows.append({
-                    'timestamp': ts,
-                    'module': module,
-                    'key': f"{key}.m1",  # 新的key是原key加.m1
-                    'value': val
-                })
-
+            for ts, m1, m0 in zip(timestamps, m1_values, m0_values):
+                new_rows.append({'timestamp': ts, 'module': module, 'key': f"{key}.m1", 'value': m1})
+                new_rows.append({'timestamp': ts, 'module': module, 'key': f"{key}.m0", 'value': m0})
+    
         # 如果有新行，添加到数据框
         if new_rows:
             new_df = pd.DataFrame(new_rows)
@@ -146,10 +167,10 @@ class SingleNodeMetrics:
             new_df['module'] = new_df['module'].astype('category')
             new_df['key'] = new_df['key'].astype('category')
             new_df['value'] = new_df['value'].astype(np.float64)
-
+    
             # 合并回原数据框
             df = pd.concat([df, new_df], ignore_index=True)
-
+    
         return df
 
     def query_metric(self, metric_name: str) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
