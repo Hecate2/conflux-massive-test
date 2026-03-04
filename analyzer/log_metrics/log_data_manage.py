@@ -1,4 +1,4 @@
-from typing import List, Tuple, Callable, Optional, Set, TypeVar
+from typing import List, Tuple, Callable, Optional, Set, TypeVar, Self
 import pathlib
 import pandas as pd
 import numpy as np
@@ -7,7 +7,6 @@ from functools import partial
 import multiprocessing as mp
 from tqdm.auto import tqdm
 import time
-from typing import Optional, Set, Tuple, Self
 from types import SimpleNamespace
 import numpy.typing as npt
 from .utils import iter_log_file_items, time_decay_weighted_average, node_paths, parse_metric_name, create_namespace_from_string_set
@@ -373,7 +372,7 @@ class GlobalMetricsStats:
     
     @staticmethod
     @functools.lru_cache(maxsize=10)
-    def _load_percentiles(log_dir: str, percentile: int) -> Self:
+    def _load_percentiles(log_dir: str, percentile: int) -> List[NodeMetricsStats]:
         func = partial(NodeMetricsStats.load_percentiles_from_path, percentile=percentile)
         return GlobalMetricsStats.for_each_node_parallel(log_dir, func)
 
@@ -453,8 +452,8 @@ class GlobalMetricsStats:
         返回指定路径下所有可用指标的集合
         """
         names: Set[str] = set()
-        for names in GlobalMetricsStats.for_each_node_parallel(log_dir, SingleNodeMetrics.collect_metric_names):
-            names.update(names)
+        for node_names in GlobalMetricsStats.for_each_node_parallel(log_dir, SingleNodeMetrics.collect_metric_names):
+            names.update(node_names)
         
         key_names: Set[str] = set()
         for name in names:
@@ -514,15 +513,5 @@ def list_metric_names(df: pd.DataFrame) -> set[str]:
     """
     返回所有可用的metric名称，格式为'module::key'的集合
     """
-
-    # 获取多级索引
-    index = df.index
-
-    # 创建一个集合存储所有的module::key组合
-    metric_names = set()
-
-    # 遍历索引中的所有(module, key)对
-    for module, key in index:
-        metric_names.add(f"{module}::{key}")
-
-    return metric_names
+    # 直接从 MultiIndex 取去重后的唯一 (module, key) 对，避免遍历全部行
+    return set(f"{module}::{key}" for module, key in df.index.unique())

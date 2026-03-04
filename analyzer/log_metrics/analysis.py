@@ -25,7 +25,7 @@ def compare_logs(net1: GlobalMetricsStats, net2: GlobalMetricsStats, stat_name: 
     all_metrics.update(net1.all_metric_names())
     all_metrics.update(net2.all_metric_names())
     selected_metrics = [
-        m for m in all_metrics if "." not in m or m[-3:] == ".m1" or m[-4:-2] == ".p"]
+        m for m in all_metrics if "." not in m or m.endswith(".m0") or m.endswith(".m1") or m[-4:-2] == ".p"]
 
     for metric_name in selected_metrics:
         res1 = net1.query_node_stat_at_percentiles(
