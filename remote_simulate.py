@@ -6,11 +6,10 @@ This script reads an inventory (by default `hosts.json`), launches nodes, runs t
 import os
 import argparse
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
 from pathlib import Path
 from typing import List
-import traceback
 
 import requests
 from loguru import logger
@@ -161,6 +160,54 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     logger.info(f"日志同步完成: 成功 {sync_success_cnt}/{gen_success_cnt}（{sync_failures} 失败）")
 
 
+def _profiler_duration_seconds(simulation_config: SimulateOptions) -> int:
+    return int(simulation_config.num_blocks * simulation_config.generation_period_ms / 1000) + 30
+
+
+def _poll_profiler_started(node: RemoteNode, start_ts: float, max_attempts: int = 36) -> tuple[RemoteNode, bool, float | None]:
+    for attempt in range(max_attempts):
+        try:
+            res = shell_cmds.ssh(node.host_spec.ip, "root", f"test -f ~/log{node.index}/flame_start_{node.index}.txt && echo ok || echo no")
+            if res and res.stdout and res.stdout.strip() == "ok":
+                delta = time.time() - start_ts
+                logger.info(f"Profiler on node {node.id} reported flame_start after {delta:.1f}s")
+                return (node, True, delta)
+        except Exception as exc:
+            logger.debug(f"Polling profiler on {node.id} attempt {attempt + 1} failed: {exc}")
+        time.sleep(5)
+
+    logger.warning(f"Profiler on node {node.id} did not report start within timeout")
+    return (node, False, None)
+
+
+def _start_profiler_on_node(node: RemoteNode, duration_s: int) -> tuple[RemoteNode, bool, float | None]:
+    profiler_cmd = docker_cmds.start_profiler(node.index, duration_s)
+    start_ts = time.time()
+    try:
+        shell_cmds.ssh(node.host_spec.ip, "root", profiler_cmd)
+        logger.debug(f"Profiler start requested on node {node.id}")
+    except Exception as exc:
+        logger.warning(f"无法在节点 {node.id} 启动 profiler: {exc}")
+        return (node, False, None)
+
+    return _poll_profiler_started(node, start_ts)
+
+
+def start_flamegraph_profilers(nodes: List[RemoteNode], duration_s: int) -> None:
+    logger.info(
+        f"Starting flamegraph profilers (duration {duration_s}s) on {len(nodes)} nodes. "
+        "This may take a few minutes as images are pulled and containers are scheduled."
+    )
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(nodes)))) as executor:
+        futures = [executor.submit(_start_profiler_on_node, node, duration_s) for node in nodes]
+        for fut in as_completed(futures):
+            node, ok, delta = fut.result()
+            if ok:
+                logger.debug(f"Profiler confirmed running on {node.id} (start delta {delta:.1f}s)")
+            else:
+                logger.warning(f"Profiler failed to start on {node.id}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a Conflux simulation on provisioned cloud instances")
     parser.add_argument("--log-prefix", default="logs", help="Base directory prefix for logs")
@@ -216,7 +263,7 @@ if __name__ == "__main__":
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
-    prepare_images_by_zone(hosts)
+    prepare_images_by_zone(hosts, include_flamegraph=simulation_config.enable_flamegraph)
 
     nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=False, enable_flamegraph=simulation_config.enable_flamegraph)
     if len(nodes) < simulation_config.target_nodes:
@@ -245,45 +292,9 @@ if __name__ == "__main__":
         logger.warning(f"交易生成初始化异常: {exc}")
     logger.success("开始运行区块链系统")
 
-    # Start per-node profilers in parallel if requested. Use a separate privileged container that
-    # attaches to the node container's PID namespace and runs flamegraph --pid 1.
     if simulation_config.enable_flamegraph:
-        duration_s = int(simulation_config.num_blocks * simulation_config.generation_period_ms / 1000) + 30
-        logger.info(f"Starting flamegraph profilers (duration {duration_s}s) on {len(nodes)} nodes. This may take a few minutes as images are pulled and containers are scheduled.")
-        # Launch profiler requests concurrently, then poll each host for a start marker.
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def _start_and_wait(node):
-            profiler_cmd = docker_cmds.start_profiler(node.index, duration_s)
-            start_ts = time.time()
-            try:
-                shell_cmds.ssh(node.host_spec.ip, "root", profiler_cmd)
-                logger.debug(f"Profiler start requested on node {node.id}")
-            except Exception:
-                logger.warning(f"无法在节点 {node.id} 启动 profiler: {traceback.format_exc()}")
-                return (node, False, None)
-            # Poll for flame_start marker (up to ~3 minutes)
-            for attempt in range(36):
-                try:
-                    res = shell_cmds.ssh(node.host_spec.ip, "root", f"test -f ~/log{node.index}/flame_start_{node.index}.txt && echo ok || echo no")
-                    if res and res.stdout and res.stdout.strip() == "ok":
-                        delta = time.time() - start_ts
-                        logger.info(f"Profiler on node {node.id} reported flame_start after {delta:.1f}s")
-                        return (node, True, delta)
-                except Exception as e:
-                    logger.debug(f"Polling profiler on {node.id} attempt {attempt+1} failed: {e}")
-                time.sleep(5)
-            logger.warning(f"Profiler on node {node.id} did not report start within timeout")
-            return (node, False, None)
-
-        with ThreadPoolExecutor(max_workers=min(32, max(1, len(nodes)))) as executor:
-            futures = [executor.submit(_start_and_wait, node) for node in nodes]
-            for fut in as_completed(futures):
-                node, ok, delta = fut.result()
-                if ok:
-                    logger.debug(f"Profiler confirmed running on {node.id} (start delta {delta:.1f}s)")
-                else:
-                    logger.warning(f"Profiler failed to start on {node.id}")
+        duration_s = _profiler_duration_seconds(simulation_config)
+        start_flamegraph_profilers(nodes, duration_s)
 
     try:
         generate_blocks_async(
