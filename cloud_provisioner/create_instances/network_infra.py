@@ -4,7 +4,7 @@ from typing import Callable, Dict, List, TypeVar
 
 from loguru import logger
 
-from .types import KeyPairRequestConfig, RegionInfo, ZoneInfo
+from .types import KeyPairRequestConfig, RegionInfo, ZoneInfo, ZoneUnavailableError
 from ..provider_interface import IEcsClient
 from cloud_provisioner.create_instances.provision_config import CloudConfig
 
@@ -166,16 +166,24 @@ class InfraRequest:
 
                 allocated_cidr_block = allocate_vacant_cidr_block(
                     occupied_blocks, prefix=20)
-                occupied_blocks.append(allocated_cidr_block)
-                v_switch_id = client.create_v_switch(
-                    region_id, zone_id, vpc_id, self.v_switch_name, allocated_cidr_block)
+                try:
+                    v_switch_id = client.create_v_switch(
+                        region_id, zone_id, vpc_id, self.v_switch_name, allocated_cidr_block)
+                except ZoneUnavailableError as exc:
+                    logger.warning(
+                        f"Skip unavailable zone {region_id}/{zone_id} during network infra preparation: {exc}")
+                    continue
 
+                occupied_blocks.append(allocated_cidr_block)
                 logger.info(
                     f"Create VSwitch {self.v_switch_name} in region {region_id} zone {zone_id}: {v_switch_id}")
                 zones.append(ZoneInfo(id=zone_id, v_switch_id=v_switch_id))
             else:
                 raise Exception(
                     f"Cannot found v-switch {self.v_switch_name} in region {region_id} zone {zone_id}")
+
+        if not zones:
+            raise Exception(f"No usable zones remain in region {region_id} after infra preparation")
 
         return {zone.id: zone for zone in zones}
     

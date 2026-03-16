@@ -15,6 +15,16 @@ from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TA
 from mypy_boto3_ec2.client import EC2Client
 
 
+def _is_zone_unavailable_error(exc: ClientError) -> bool:
+    error = exc.response.get('Error', {})
+    code = str(error.get('Code', ''))
+    message = str(error.get('Message', ''))
+    normalized = f"{code} {message}".lower()
+    zone_markers = ['availability zone', 'subnet', 'zone']
+    unavailable_markers = ['unavailable', 'not supported', 'not available']
+    return any(marker in normalized for marker in zone_markers) and any(marker in normalized for marker in unavailable_markers)
+
+
 def _instance_tags(cfg: InstanceConfig) -> List[dict]:
     return [
         {'Key': DEFAULT_COMMON_TAG_KEY, 'Value': DEFAULT_COMMON_TAG_VALUE},
@@ -99,6 +109,10 @@ def create_instances_in_zone(
         elif code == "Unsupported":
             logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
             error_type = CreateInstanceError.NoInstanceType
+
+        elif _is_zone_unavailable_error(exc):
+            logger.warning(f"Skip unavailable zone {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}: {exc}")
+            error_type = CreateInstanceError.ZoneUnavailable
             
         else:
             logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
